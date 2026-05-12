@@ -37,8 +37,8 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config=icil_jax_rlbench/configs/pretrain_supernode.py \
   --config.data.preload_to_memory=True \
   --config.data.keep_open=False \
-  --config.data.K=4 \
-  --config.data.L=10 \
+  --config.data.K=2 \
+  --config.data.L=8 \
   --config.data.T_obs=2 \
   --config.data.H=16 \
   --config.data.stride=2 \
@@ -79,5 +79,5 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config.wandb.name=pretrain_supernode_preload_snellius \
   --config.wandb.prediction_log_every=200 \
   --config.wandb.prediction_num_samples=64 \
-  --config.wandb.prediction_num_plots=4 \
+  --config.wandb.prediction_num_plots=16 \
   --config.train.log_attention_stats=True
