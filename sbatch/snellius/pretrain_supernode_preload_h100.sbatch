@@ -34,7 +34,11 @@ mkdir -p sbatch/snellius/logs
 source ./env_jax_rlbench_snellius.sh
 export PYTHONPATH="${SLURM_SUBMIT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-srun python -m icil_jax_rlbench.pretrain_direct_regression \
+echo "CUDA_VISIBLE_DEVICES before srun: ${CUDA_VISIBLE_DEVICES:-unset}"
+srun --gres=gpu:4 nvidia-smi
+srun --gres=gpu:4 python -c 'import jax; backend = jax.default_backend(); print(f"JAX backend: {backend}; devices: {jax.devices()}"); assert backend == "gpu", f"Expected JAX gpu backend, got {backend}"'
+
+srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config=icil_jax_rlbench/configs/pretrain_supernode.py \
   --config.data.preload_to_memory=True \
   --config.data.keep_open=False \

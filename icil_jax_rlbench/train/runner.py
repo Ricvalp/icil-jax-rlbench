@@ -121,6 +121,15 @@ def _unreplicate_params(replicated_state: TrainState) -> Any:
     return jax.tree_util.tree_map(lambda x: jax.device_get(x[0]), replicated_state.params)
 
 
+def _replicate_to_local_devices(tree: Any, num_devices: int) -> Any:
+    def _replicate_leaf(x):
+        x = jnp.asarray(x)
+        return jax.device_put(jnp.broadcast_to(x, (num_devices,) + tuple(x.shape)))
+
+    return jax.tree_util.tree_map(_replicate_leaf, tree)
+
+
+
 def _prediction_examples(
     *,
     split: str,
@@ -272,13 +281,13 @@ def train(mode: str, cfg: ConfigDict) -> None:
     num_devices = jax.local_device_count()
     if int(cfg.train.batch_size) % num_devices != 0:
         raise ValueError(f'train.batch_size={cfg.train.batch_size} must be divisible by local_device_count={num_devices}.')
-    replicated_state = jax.device_put_replicated(state, jax.local_devices())
+    replicated_state = _replicate_to_local_devices(state, num_devices)
     step_cfg = _step_config(cfg)
     if mode == 'pretrain':
         p_train_step = create_pretrain_step(model, step_cfg)
     elif mode == 'param_maml':
         inner_mask = make_name_mask(state.params, include=step_cfg.inner_param_include, exclude=step_cfg.inner_param_exclude)
-        inner_mask = jax.device_put_replicated(inner_mask, jax.local_devices())
+        inner_mask = _replicate_to_local_devices(inner_mask, num_devices)
         # The mask is static in value but a pytree constant in the closure; use host copy for pmap tracing.
         inner_mask_host = jax.tree_util.tree_map(lambda x: bool(jax.device_get(x[0])) if hasattr(x, 'shape') and x.shape else bool(jax.device_get(x)), inner_mask)
         p_train_step = create_param_maml_step(model, step_cfg, inner_mask=inner_mask_host)
