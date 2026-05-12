@@ -116,6 +116,8 @@ Switch encoder:
 - `data.stride`: temporal stride for observations/actions.
 - `data.traj_len`: fixed support action trajectory tokens per demo.
 - `data.preload_to_memory`: load all H5 arrays into host RAM at startup.
+- `train.prefetch_workers`: background threads that build training batches.
+- `train.prefetch_batches`: number of ready batches to keep queued.
 - `model.encoder.encoder_type`: `perceiver` or `supernode`.
 - `model.encoder.use_rgb`: include dense RGB point features.
 - `model.encoder.support_num_latents`: compressed support-memory token count.

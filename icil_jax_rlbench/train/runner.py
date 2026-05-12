@@ -18,6 +18,7 @@ from icil_jax_rlbench.data.sampler import ICILDataConfig, ICILSampler, shard_bat
 from icil_jax_rlbench.models.config import policy_config_from
 from icil_jax_rlbench.models.direct_regression_policy import DirectRegressionPolicy
 from icil_jax_rlbench.train.checkpoints import load_checkpoint, save_checkpoint
+from icil_jax_rlbench.train.prefetch import BackgroundBatchPrefetcher
 from icil_jax_rlbench.train.trajectory_plots import ActionChunkPlotData, make_action_chunk_figures
 from icil_jax_rlbench.train.step import (
     StepConfig,
@@ -129,7 +130,6 @@ def _replicate_to_local_devices(tree: Any, num_devices: int) -> Any:
     return jax.tree_util.tree_map(_replicate_leaf, tree)
 
 
-
 def _prediction_examples(
     *,
     split: str,
@@ -187,6 +187,38 @@ def _evaluate_prediction_split(
         num_plots=num_plots,
     )
     return mse, examples
+
+
+def _build_train_batch(
+    *,
+    mode: str,
+    sampler: ICILSampler,
+    cfg: ConfigDict,
+    policy_cfg: Any,
+) -> Dict[str, Any]:
+    if mode == 'pretrain':
+        return sampler.build_pretrain_batch(
+            int(cfg.train.batch_size),
+            load_rgb=bool(policy_cfg.encoder.use_rgb),
+            load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+        )
+    if mode == 'param_maml':
+        return sampler.build_param_maml_batch(
+            int(cfg.train.batch_size),
+            inner_steps=int(cfg.maml.inner_steps),
+            num_inner_queries=int(cfg.maml.num_inner_queries),
+            num_query_loss_samples=int(cfg.maml.num_query_loss_samples),
+            load_rgb=bool(policy_cfg.encoder.use_rgb),
+            load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+        )
+    return sampler.build_memory_maml_batch(
+        int(cfg.train.batch_size),
+        inner_steps=int(cfg.maml.inner_steps),
+        num_inner_queries=int(cfg.maml.num_inner_queries),
+        num_query_loss_samples=int(cfg.maml.num_query_loss_samples),
+        load_rgb=bool(policy_cfg.encoder.use_rgb),
+        load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+    )
 
 
 def _maybe_log_prediction_eval(
@@ -294,61 +326,76 @@ def train(mode: str, cfg: ConfigDict) -> None:
     else:
         p_train_step = create_memory_maml_step(model, step_cfg)
 
+    worker_stores: list[RLBenchCacheStore] = []
+    prefetcher = None
+    prefetch_workers = int(getattr(cfg.train, 'prefetch_workers', 0))
+    prefetch_batches = int(getattr(cfg.train, 'prefetch_batches', 0))
+    if prefetch_workers > 0 and prefetch_batches > 0:
+        def make_batch_fn(worker_id: int):
+            worker_store = store
+            if not store.preload_to_memory:
+                worker_store = RLBenchCacheStore(keys, keep_open=store.keep_open, preload_to_memory=False)
+                worker_stores.append(worker_store)
+            worker_sampler = ICILSampler(worker_store, data_cfg, seed=int(cfg.train.seed) + 300003 + int(worker_id))
+            return lambda: _build_train_batch(mode=mode, sampler=worker_sampler, cfg=cfg, policy_cfg=policy_cfg)
+
+        prefetcher = BackgroundBatchPrefetcher(
+            make_batch_fn,
+            num_workers=prefetch_workers,
+            max_prefetch=prefetch_batches,
+        )
+        logging.info('Training batch prefetch enabled: workers=%d batches=%d', prefetch_workers, prefetch_batches)
+    else:
+        logging.info('Training batch prefetch disabled.')
+
     wandb_mod = _maybe_wandb(cfg)
     ckpt_dir = Path(cfg.train.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     last_time = time.time()
-    for step in range(1, int(cfg.train.num_steps) + 1):
-        t0 = time.time()
-        if mode == 'pretrain':
-            batch = sampler.build_pretrain_batch(int(cfg.train.batch_size), load_rgb=bool(policy_cfg.encoder.use_rgb), load_mask_id=bool(policy_cfg.encoder.use_mask_id))
-        elif mode == 'param_maml':
-            batch = sampler.build_param_maml_batch(
-                int(cfg.train.batch_size),
-                inner_steps=int(cfg.maml.inner_steps),
-                num_inner_queries=int(cfg.maml.num_inner_queries),
-                num_query_loss_samples=int(cfg.maml.num_query_loss_samples),
-                load_rgb=bool(policy_cfg.encoder.use_rgb),
-                load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+    try:
+        for step in range(1, int(cfg.train.num_steps) + 1):
+            t0 = time.time()
+            if prefetcher is None:
+                batch = _build_train_batch(mode=mode, sampler=sampler, cfg=cfg, policy_cfg=policy_cfg)
+                prefetch_queue_size = 0
+            else:
+                batch = prefetcher.get()
+                prefetch_queue_size = prefetcher.qsize()
+            data_wait_s = time.time() - t0
+            replicated_state, metrics = p_train_step(replicated_state, shard_batch(batch, num_devices))
+            if step == 1:
+                jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else x, metrics)
+            now = time.time()
+            if step == 1 or step % int(cfg.train.log_every) == 0:
+                metrics = dict(metrics)
+                metrics['data_wait_s'] = jnp.asarray(data_wait_s, dtype=jnp.float32)
+                metrics['prefetch_queue_size'] = jnp.asarray(prefetch_queue_size, dtype=jnp.float32)
+                metrics['step_s'] = jnp.asarray((now - last_time) / max(1, int(cfg.train.log_every)), dtype=jnp.float32)
+                _log_metrics('train', step, metrics, wandb_mod)
+                last_time = now
+            _maybe_log_prediction_eval(
+                step=step,
+                cfg=cfg,
+                wandb_mod=wandb_mod,
+                replicated_state=replicated_state,
+                train_eval_sampler=train_eval_sampler,
+                excluded_eval_sampler=excluded_eval_sampler,
+                policy_cfg=policy_cfg,
+                eval_predict=eval_predict,
             )
-        else:
-            batch = sampler.build_memory_maml_batch(
-                int(cfg.train.batch_size),
-                inner_steps=int(cfg.maml.inner_steps),
-                num_inner_queries=int(cfg.maml.num_inner_queries),
-                num_query_loss_samples=int(cfg.maml.num_query_loss_samples),
-                load_rgb=bool(policy_cfg.encoder.use_rgb),
-                load_mask_id=bool(policy_cfg.encoder.use_mask_id),
-            )
-        data_wait_s = time.time() - t0
-        replicated_state, metrics = p_train_step(replicated_state, shard_batch(batch, num_devices))
-        if step == 1:
-            jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else x, metrics)
-        now = time.time()
-        if step == 1 or step % int(cfg.train.log_every) == 0:
-            metrics = dict(metrics)
-            metrics['data_wait_s'] = jnp.asarray(data_wait_s, dtype=jnp.float32)
-            metrics['step_s'] = jnp.asarray((now - last_time) / max(1, int(cfg.train.log_every)), dtype=jnp.float32)
-            _log_metrics('train', step, metrics, wandb_mod)
-            last_time = now
-        _maybe_log_prediction_eval(
-            step=step,
-            cfg=cfg,
-            wandb_mod=wandb_mod,
-            replicated_state=replicated_state,
-            train_eval_sampler=train_eval_sampler,
-            excluded_eval_sampler=excluded_eval_sampler,
-            policy_cfg=policy_cfg,
-            eval_predict=eval_predict,
-        )
-        if step % int(cfg.train.ckpt_every) == 0:
-            path = ckpt_dir / f'step_{step:07d}.pkl'
-            save_checkpoint(path, state=replicated_state, step=step, config=cfg, replicated=True)
-            logging.info('Saved checkpoint: %s', path)
-    path = ckpt_dir / 'last.pkl'
-    save_checkpoint(path, state=replicated_state, step=int(cfg.train.num_steps), config=cfg, replicated=True)
-    logging.info('Training complete. Final checkpoint: %s', path)
-    if wandb_mod is not None:
-        wandb_mod.finish()
-    if excluded_store is not None:
-        excluded_store.close()
+            if step % int(cfg.train.ckpt_every) == 0:
+                path = ckpt_dir / f'step_{step:07d}.pkl'
+                save_checkpoint(path, state=replicated_state, step=step, config=cfg, replicated=True)
+                logging.info('Saved checkpoint: %s', path)
+        path = ckpt_dir / 'last.pkl'
+        save_checkpoint(path, state=replicated_state, step=int(cfg.train.num_steps), config=cfg, replicated=True)
+        logging.info('Training complete. Final checkpoint: %s', path)
+    finally:
+        if prefetcher is not None:
+            prefetcher.close()
+        for worker_store in worker_stores:
+            worker_store.close()
+        if wandb_mod is not None:
+            wandb_mod.finish()
+        if excluded_store is not None:
+            excluded_store.close()

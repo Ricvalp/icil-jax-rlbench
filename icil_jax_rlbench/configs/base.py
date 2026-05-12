@@ -74,6 +74,8 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.train.grad_clip_norm = 1.0
     cfg.train.log_every = 100
     cfg.train.ckpt_every = 10000
+    cfg.train.prefetch_workers = 2
+    cfg.train.prefetch_batches = 2
     cfg.train.resume_path = ''
     cfg.train.resume_optimizer = True
     cfg.train.resume_rng = True
