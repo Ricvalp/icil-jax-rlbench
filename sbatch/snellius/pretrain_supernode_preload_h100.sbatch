@@ -44,8 +44,8 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config.data.stride=2 \
   --config.data.traj_len=512 \
   --config.data.action_representation=absolute \
-  --config.data.task_sampling=task_uniform \
-  --config.data.task_sampling_alpha=1.0 \
+  --config.data.task_sampling=variation_power \
+  --config.data.task_sampling_alpha=0.8 \
   --config.model.encoder.d_model=256 \
   --config.model.encoder.n_heads=4 \
   --config.model.encoder.dropout=0.0 \
@@ -71,7 +71,7 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config.train.grad_clip_norm=1.0 \
   --config.train.loss_type=l1 \
   --config.train.log_every=100 \
-  --config.train.ckpt_every=10000 \
+  --config.train.ckpt_every=1000 \
   --config.train.resume_path='' \
   --config.train.resume_optimizer=True \
   --config.train.resume_rng=True \
