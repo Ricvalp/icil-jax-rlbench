@@ -42,7 +42,7 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config.data.T_obs=2 \
   --config.data.H=16 \
   --config.data.stride=2 \
-  --config.data.traj_len=64 \
+  --config.data.traj_len=512 \
   --config.data.action_representation=absolute \
   --config.data.task_sampling=task_uniform \
   --config.data.task_sampling_alpha=1.0 \
@@ -58,7 +58,7 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config.model.encoder.supernode_temperature=0.02 \
   --config.model.encoder.supernode_layers=2 \
   --config.model.encoder.query_num_latents=16 \
-  --config.model.encoder.support_num_latents=64 \
+  --config.model.encoder.support_num_latents=128 \
   --config.model.encoder.use_rgb=True \
   --config.model.encoder.use_mask_id=False \
   --config.model.encoder.use_traj_tokens=True \
@@ -76,4 +76,5 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config.train.resume_optimizer=True \
   --config.train.resume_rng=True \
   --config.wandb.enable=True \
-  --config.wandb.name=pretrain_supernode_preload_snellius
+  --config.wandb.name=pretrain_supernode_preload_snellius \
+  --config.train.log_attention_stats=True

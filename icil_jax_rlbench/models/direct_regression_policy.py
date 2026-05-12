@@ -74,12 +74,15 @@ class ActionDecoder(nn.Module):
         max_probs = []
         raw_max_probs = []
         masses = []
+        query_entropies = []
         for i in range(int(self.cfg.n_layers)):
             x = SelfAttentionBlock(tx, name=f'self_{i}')(x, train=train)
             if return_attn_stats:
                 x, weights = CrossAttentionBlock(tx, name=f'cross_{i}')(
                     x, context, kv_mask=context_mask, train=train, return_weights=True
                 )
+                query_stats = self._query_attention_stats(weights, query_len=query_len, query_mask=query_mask)
+                query_entropies.append(query_stats['attn_query_entropy'])
                 if support_tokens is None:
                     zero = jnp.asarray(0.0, dtype=jnp.float32)
                     entropies.append(zero)
@@ -102,9 +105,26 @@ class ActionDecoder(nn.Module):
                 'attn_memory_max': jnp.mean(jnp.stack(max_probs)),
                 'attn_memory_raw_max': jnp.mean(jnp.stack(raw_max_probs)),
                 'attn_memory_mass': jnp.mean(jnp.stack(masses)),
+                'attn_query_entropy': jnp.mean(jnp.stack(query_entropies)),
             }
             return pred, stats
         return pred
+
+    def _query_attention_stats(self, weights: jnp.ndarray, *, query_len: int, query_mask: Optional[jnp.ndarray]):
+        # weights=[B, heads, action_queries, query_tokens + support_tokens].
+        query_w = weights[..., : int(query_len)].astype(jnp.float32)
+        if query_mask is not None:
+            qmask = query_mask.astype(jnp.bool_)[:, None, None, :]
+            query_w = jnp.where(qmask, query_w, 0.0)
+            valid_count = jnp.sum(query_mask.astype(jnp.float32), axis=-1)
+        else:
+            valid_count = jnp.full((weights.shape[0],), int(query_len), dtype=jnp.float32)
+        mass = jnp.sum(query_w, axis=-1)
+        query_dist = query_w / (mass[..., None] + 1e-8)
+        entropy = -jnp.sum(jnp.where(query_dist > 0.0, query_dist * jnp.log(query_dist + 1e-8), 0.0), axis=-1)
+        norm = jnp.log(jnp.maximum(valid_count, 2.0))[:, None, None]
+        entropy = jnp.where(mass > 1e-8, entropy / norm, 0.0)
+        return {'attn_query_entropy': jnp.mean(entropy)}
 
     def _memory_attention_stats(self, weights: jnp.ndarray, *, query_len: int, support_mask: Optional[jnp.ndarray]):
         # weights=[B, heads, action_queries, query_tokens + support_tokens].

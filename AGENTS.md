@@ -168,6 +168,7 @@ Metrics:
 - `train/attn_memory_max`: maximum probability after renormalizing over memory tokens only.
 - `train/attn_memory_raw_max`: maximum raw decoder cross-attention probability assigned to a memory token.
 - `train/attn_memory_mass`: total raw decoder cross-attention mass assigned to memory tokens.
+- `train/attn_query_entropy`: normalized entropy over query tokens.
 
 ## Checkpoints
 
