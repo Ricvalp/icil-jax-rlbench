@@ -11,7 +11,18 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.data = ConfigDict()
     cfg.data.cache_root = os.environ.get('ICIL_CACHE_ROOT', '/mnt/external_storage/robotics/rlbench/icil_rlbench/.rlbench_cache_dense_v4')
     cfg.data.tasks = ()
-    cfg.data.exclude_tasks = ()
+    cfg.data.exclude_tasks = (
+        'slide_block_to_target',
+        'close_laptop_lid',
+        'close_box',
+        'open_jar',
+        'toilet_seat_up',
+        'push_button',
+        'basketball_in_hoop',
+        'meat_on_grill',
+        'put_umbrella_in_umbrella_stand',
+        'lamp_on',
+    )
     cfg.data.K = 4
     cfg.data.L = 10
     cfg.data.T_obs = 2
