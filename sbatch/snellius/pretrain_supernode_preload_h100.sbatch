@@ -32,8 +32,9 @@ conda activate icil-rlbench
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p sbatch/snellius/logs
 source ./env_jax_rlbench_snellius.sh
+export PYTHONPATH="${SLURM_SUBMIT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-srun python icil_jax_rlbench/pretrain_direct_regression.py \
+srun python -m icil_jax_rlbench.pretrain_direct_regression \
   --config=icil_jax_rlbench/configs/pretrain_supernode.py \
   --config.data.preload_to_memory=True \
   --config.data.keep_open=False \
