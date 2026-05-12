@@ -148,3 +148,17 @@ This adds the following metrics. The default is `False`, so the normal training 
 - `train/attn_memory_raw_max`: max raw cross-attention probability assigned to a support/memory token.
 - `train/attn_memory_mass`: total raw cross-attention probability mass assigned to support/memory tokens.
 - `train/attn_query_entropy`: normalized entropy of decoder cross-attention over query tokens.
+
+When W&B is enabled, training also logs periodic prediction diagnostics by
+default:
+
+```bash
+--config.wandb.prediction_log_every=200 \
+--config.wandb.prediction_num_samples=64 \
+--config.wandb.prediction_num_plots=4
+```
+
+At each logging step it samples pretrain-style batches from the training task
+pool and, if `data.exclude_tasks` is set, from the excluded task pool. It logs
+`eval/train_mse`, optional `eval/excluded_mse`, and Plotly 3D action-chunk
+figures comparing decoded predicted XYZ chunks with ground truth chunks.

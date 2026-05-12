@@ -89,6 +89,9 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.wandb.entity = os.environ.get('WANDB_ENTITY', '')
     cfg.wandb.mode = os.environ.get('WANDB_MODE', 'online')
     cfg.wandb.name = ''
+    cfg.wandb.prediction_log_every = 200
+    cfg.wandb.prediction_num_samples = 64
+    cfg.wandb.prediction_num_plots = 4
 
     if mode in ('param_maml', 'memory_maml'):
         cfg.train.batch_size = 4

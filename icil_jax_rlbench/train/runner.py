@@ -9,13 +9,16 @@ from absl import logging
 import jax
 import jax.numpy as jnp
 from ml_collections import ConfigDict
+import numpy as np
 import optax
 
+from icil_jax_rlbench.data.action_representation import decode_action_chunk
 from icil_jax_rlbench.data.h5_cache import RLBenchCacheStore, build_keys
 from icil_jax_rlbench.data.sampler import ICILDataConfig, ICILSampler, shard_batch
 from icil_jax_rlbench.models.config import policy_config_from
 from icil_jax_rlbench.models.direct_regression_policy import DirectRegressionPolicy
 from icil_jax_rlbench.train.checkpoints import load_checkpoint, save_checkpoint
+from icil_jax_rlbench.train.trajectory_plots import ActionChunkPlotData, make_action_chunk_figures
 from icil_jax_rlbench.train.step import (
     StepConfig,
     TrainState,
@@ -114,10 +117,127 @@ def _log_metrics(prefix: str, step: int, metrics: Dict[str, Any], wandb_mod=None
         wandb_mod.log({**flat, f'{prefix}/step': step}, step=step)
 
 
+def _unreplicate_params(replicated_state: TrainState) -> Any:
+    return jax.tree_util.tree_map(lambda x: jax.device_get(x[0]), replicated_state.params)
+
+
+def _prediction_examples(
+    *,
+    split: str,
+    batch: Dict[str, np.ndarray],
+    pred: np.ndarray,
+    action_representation: str,
+    num_plots: int,
+) -> Sequence[ActionChunkPlotData]:
+    target = np.asarray(batch['target_action'], dtype=np.float32)
+    query_state = np.asarray(batch['query_state'], dtype=np.float32)
+    pred_abs = decode_action_chunk(pred, query_state=query_state, representation=action_representation)
+    target_abs = decode_action_chunk(target, query_state=query_state, representation=action_representation)
+    count = min(int(num_plots), int(pred.shape[0]))
+    out = []
+    for i in range(count):
+        mse = float(np.mean(np.square(pred[i].astype(np.float32) - target[i].astype(np.float32))))
+        out.append(
+            ActionChunkPlotData(
+                name=f'chunk_{i}',
+                split=split,
+                pred_xyz=pred_abs[i, :, :3],
+                target_xyz=target_abs[i, :, :3],
+                mse=mse,
+            )
+        )
+    return out
+
+
+def _evaluate_prediction_split(
+    *,
+    split: str,
+    sampler: ICILSampler,
+    eval_predict,
+    params: Any,
+    policy_cfg: Any,
+    cfg: ConfigDict,
+) -> tuple[float, Sequence[ActionChunkPlotData]]:
+    num_samples = int(getattr(cfg.wandb, 'prediction_num_samples', 64))
+    num_plots = int(getattr(cfg.wandb, 'prediction_num_plots', 4))
+    if num_samples <= 0:
+        return 0.0, ()
+    batch = sampler.build_pretrain_batch(
+        num_samples,
+        load_rgb=bool(policy_cfg.encoder.use_rgb),
+        load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+    )
+    pred = np.asarray(jax.device_get(eval_predict(params, batch)), dtype=np.float32)
+    target = np.asarray(batch['target_action'], dtype=np.float32)
+    mse = float(np.mean(np.square(pred - target)))
+    examples = _prediction_examples(
+        split=split,
+        batch=batch,
+        pred=pred,
+        action_representation=str(cfg.data.action_representation),
+        num_plots=num_plots,
+    )
+    return mse, examples
+
+
+def _maybe_log_prediction_eval(
+    *,
+    step: int,
+    cfg: ConfigDict,
+    wandb_mod,
+    replicated_state: TrainState,
+    train_eval_sampler: ICILSampler,
+    excluded_eval_sampler: Optional[ICILSampler],
+    policy_cfg: Any,
+    eval_predict,
+) -> None:
+    if wandb_mod is None:
+        return
+    every = int(getattr(cfg.wandb, 'prediction_log_every', 0))
+    if every <= 0 or step % every != 0:
+        return
+
+    params = _unreplicate_params(replicated_state)
+    payload: Dict[str, Any] = {}
+    plot_examples = []
+    train_mse, train_examples = _evaluate_prediction_split(
+        split='train',
+        sampler=train_eval_sampler,
+        eval_predict=eval_predict,
+        params=params,
+        policy_cfg=policy_cfg,
+        cfg=cfg,
+    )
+    payload['eval/train_mse'] = train_mse
+    plot_examples.extend(train_examples)
+
+    if excluded_eval_sampler is not None:
+        excluded_mse, excluded_examples = _evaluate_prediction_split(
+            split='excluded',
+            sampler=excluded_eval_sampler,
+            eval_predict=eval_predict,
+            params=params,
+            policy_cfg=policy_cfg,
+            cfg=cfg,
+        )
+        payload['eval/excluded_mse'] = excluded_mse
+        plot_examples.extend(excluded_examples)
+
+    try:
+        figures = make_action_chunk_figures(plot_examples)
+    except ImportError as exc:
+        logging.warning('Skipping prediction trajectory plots because plotly is unavailable: %s', exc)
+        figures = {}
+    for name, fig in figures.items():
+        payload[f'eval/action_chunk/{name}'] = wandb_mod.Plotly(fig) if hasattr(wandb_mod, 'Plotly') else fig
+    wandb_mod.log(payload, step=step)
+
+
 def train(mode: str, cfg: ConfigDict) -> None:
     if mode not in ('pretrain', 'param_maml', 'memory_maml'):
         raise ValueError(f'Unknown mode={mode!r}')
-    keys, selected_tasks = build_keys(Path(cfg.data.cache_root), tasks=_tasks(getattr(cfg.data, 'tasks', ())), exclude_tasks=tuple(getattr(cfg.data, 'exclude_tasks', ())))
+    excluded_tasks = _tasks(getattr(cfg.data, 'exclude_tasks', ())) or ()
+    keys, selected_tasks = build_keys(Path(cfg.data.cache_root), tasks=_tasks(getattr(cfg.data, 'tasks', ())), exclude_tasks=excluded_tasks)
     store = RLBenchCacheStore(keys, keep_open=bool(cfg.data.keep_open), preload_to_memory=bool(cfg.data.preload_to_memory))
     if store.preload_to_memory:
         logging.info('Preloaded RLBench cache into RAM: %.2f GiB', store.preloaded_bytes / (1024 ** 3))
@@ -126,8 +246,19 @@ def train(mode: str, cfg: ConfigDict) -> None:
 
     data_cfg = _data_config(cfg)
     sampler = ICILSampler(store, data_cfg, seed=int(cfg.train.seed))
+    train_eval_sampler = ICILSampler(store, data_cfg, seed=int(cfg.train.seed) + 100003)
+    excluded_eval_sampler = None
+    excluded_store = None
+    if excluded_tasks:
+        excluded_keys, excluded_selected = build_keys(Path(cfg.data.cache_root), tasks=excluded_tasks, exclude_tasks=())
+        excluded_store = RLBenchCacheStore(excluded_keys, keep_open=bool(cfg.data.keep_open), preload_to_memory=False)
+        excluded_eval_sampler = ICILSampler(excluded_store, data_cfg, seed=int(cfg.train.seed) + 200003)
+        logging.info('Prediction eval excluded tasks: tasks=%d variations=%d', len(excluded_selected), len(excluded_keys))
+    else:
+        logging.info('No data.exclude_tasks configured; skipping excluded-task prediction eval.')
     policy_cfg = policy_config_from(cfg.model, H=data_cfg.H)
     model = DirectRegressionPolicy(policy_cfg, state_dim=state_dim, action_dim=action_dim)
+    eval_predict = jax.jit(lambda params, batch: model.apply({'params': params}, batch, train=False))
 
     init_batch = sampler.build_pretrain_batch(
         max(1, min(int(cfg.train.batch_size), 2)),
@@ -191,6 +322,16 @@ def train(mode: str, cfg: ConfigDict) -> None:
             metrics['step_s'] = jnp.asarray((now - last_time) / max(1, int(cfg.train.log_every)), dtype=jnp.float32)
             _log_metrics('train', step, metrics, wandb_mod)
             last_time = now
+        _maybe_log_prediction_eval(
+            step=step,
+            cfg=cfg,
+            wandb_mod=wandb_mod,
+            replicated_state=replicated_state,
+            train_eval_sampler=train_eval_sampler,
+            excluded_eval_sampler=excluded_eval_sampler,
+            policy_cfg=policy_cfg,
+            eval_predict=eval_predict,
+        )
         if step % int(cfg.train.ckpt_every) == 0:
             path = ckpt_dir / f'step_{step:07d}.pkl'
             save_checkpoint(path, state=replicated_state, step=step, config=cfg, replicated=True)
@@ -200,3 +341,5 @@ def train(mode: str, cfg: ConfigDict) -> None:
     logging.info('Training complete. Final checkpoint: %s', path)
     if wandb_mod is not None:
         wandb_mod.finish()
+    if excluded_store is not None:
+        excluded_store.close()

@@ -78,4 +78,7 @@ srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config.train.resume_optimizer=True \
   --config.train.resume_rng=True \
   --config.wandb.enable=True \
-  --config.wandb.name=pretrain_supernode_preload_das
+  --config.wandb.name=pretrain_supernode_preload_das \
+  --config.wandb.prediction_log_every=200 \
+  --config.wandb.prediction_num_samples=64 \
+  --config.wandb.prediction_num_plots=4
