@@ -35,9 +35,6 @@ cd "${SLURM_SUBMIT_DIR}"
 mkdir -p sbatch/das/logs
 source ./env_jax_rlbench_das.sh
 
-# Run from the parent directory so imports resolve as icil_jax_rlbench.*.
-cd ..
-
 srun python icil_jax_rlbench/pretrain_direct_regression.py \
   --config=icil_jax_rlbench/configs/pretrain_supernode.py \
   --config.data.preload_to_memory=True \

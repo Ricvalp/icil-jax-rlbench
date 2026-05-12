@@ -25,13 +25,13 @@ The first implementation intentionally covers direct regression only. It does no
 
 ## Directory Structure
 
-- `data/`: standalone RLBench dense H5 cache reader and samplers.
-- `models/`: Flax attention blocks, Perceiver/Supernode encoders, and direct-regression policy.
-- `train/`: pmap training runner, MAML/pretrain steps, checkpoint utilities.
-- `configs/`: ml-collections configs for the six main combinations.
-- `pretrain_direct_regression.py`: pretraining entrypoint.
-- `param_maml_direct_regression.py`: parameter MAML/FOMAML entrypoint.
-- `memory_maml_direct_regression.py`: memory MAML/FOMAML entrypoint.
+- `icil_jax_rlbench/data/`: standalone RLBench dense H5 cache reader and samplers.
+- `icil_jax_rlbench/models/`: Flax attention blocks, Perceiver/Supernode encoders, and direct-regression policy.
+- `icil_jax_rlbench/train/`: pmap training runner, MAML/pretrain steps, checkpoint utilities.
+- `icil_jax_rlbench/configs/`: ml-collections configs for the six main combinations.
+- `icil_jax_rlbench/pretrain_direct_regression.py`: pretraining entrypoint.
+- `icil_jax_rlbench/param_maml_direct_regression.py`: parameter MAML/FOMAML entrypoint.
+- `icil_jax_rlbench/memory_maml_direct_regression.py`: memory MAML/FOMAML entrypoint.
 - `README.md`: user-facing quickstart.
 
 ## Data Contract
