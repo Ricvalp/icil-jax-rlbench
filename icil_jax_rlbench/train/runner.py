@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import os
 import time
 from pathlib import Path
@@ -45,6 +46,22 @@ def _maybe_wandb(cfg: ConfigDict):
         config=cfg.to_dict(),
     )
     return wandb
+
+
+def _checkpoint_dir_for_run(cfg: ConfigDict, wandb_mod) -> Path:
+    run = getattr(wandb_mod, 'run', None) if wandb_mod is not None else None
+    run_id = str(getattr(run, 'id', '') or '')
+    if not run_id:
+        run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+    ckpt_dir = Path(cfg.train.checkpoint_dir) / run_id
+    cfg.train.checkpoint_dir = str(ckpt_dir)
+    if wandb_mod is not None:
+        try:
+            wandb_mod.config.update({'train.checkpoint_dir': str(ckpt_dir)}, allow_val_change=True)
+        except TypeError:
+            wandb_mod.config.update({'train.checkpoint_dir': str(ckpt_dir)})
+    logging.info('Checkpoint directory: %s', ckpt_dir)
+    return ckpt_dir
 
 
 def _tasks(value: Any) -> Optional[Sequence[str]]:
@@ -349,7 +366,7 @@ def train(mode: str, cfg: ConfigDict) -> None:
         logging.info('Training batch prefetch disabled.')
 
     wandb_mod = _maybe_wandb(cfg)
-    ckpt_dir = Path(cfg.train.checkpoint_dir)
+    ckpt_dir = _checkpoint_dir_for_run(cfg, wandb_mod)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     last_time = time.time()
     try:

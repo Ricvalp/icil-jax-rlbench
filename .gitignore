@@ -39,9 +39,15 @@ logs/
 runs/
 wandb/
 outputs/
+eval_outputs/
+eval_checkpoints/
 checkpoints/
 profiles/
 tensorboard/
+rlbench/
+urdfs/
+rlbench/
+urdfs/
 
 # Slurm / sbatch logs
 slurm-*.out
