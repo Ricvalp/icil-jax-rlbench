@@ -52,7 +52,7 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.model.encoder.supernode_temperature = 0.02
     cfg.model.encoder.supernode_layers = 2
     cfg.model.encoder.traj_layers = 1
-    cfg.model.encoder.max_positions = 2048
+    cfg.model.encoder.max_positions = 0
     cfg.model.encoder.mask_id_vocab = 256
     cfg.model.encoder.use_rgb = True
     cfg.model.encoder.use_mask_id = False

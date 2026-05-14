@@ -314,7 +314,9 @@ def train(mode: str, cfg: ConfigDict) -> None:
         logging.info('Prediction eval excluded tasks: tasks=%d variations=%d', len(excluded_selected), len(excluded_keys))
     else:
         logging.info('No data.exclude_tasks configured; skipping excluded-task prediction eval.')
-    policy_cfg = policy_config_from(cfg.model, H=data_cfg.H)
+    policy_cfg = policy_config_from(cfg.model, H=data_cfg.H, data_cfg=data_cfg)
+    cfg.model.encoder.max_positions = int(policy_cfg.encoder.max_positions)
+    logging.info('Resolved encoder.max_positions=%d', int(policy_cfg.encoder.max_positions))
     model = DirectRegressionPolicy(policy_cfg, state_dim=state_dim, action_dim=action_dim)
     eval_predict = jax.jit(lambda params, batch: model.apply({'params': params}, batch, train=False))
 

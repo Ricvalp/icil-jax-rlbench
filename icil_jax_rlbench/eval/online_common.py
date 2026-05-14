@@ -687,7 +687,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
     if int(getattr(cfg.conditioning, 'num_points', 0)) <= 0:
         cfg.conditioning.num_points = int(num_points)
 
-    policy_cfg = policy_config_from(ckpt_cfg.model, H=data_cfg.H)
+    policy_cfg = policy_config_from(ckpt_cfg.model, H=data_cfg.H, data_cfg=data_cfg)
     model = DirectRegressionPolicy(policy_cfg, state_dim=state_dim, action_dim=action_dim)
     params = ckpt['params']
     policy = JaxOnlinePolicy(model, params, data_cfg)
@@ -724,6 +724,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             'action_representation': str(data_cfg.action_representation),
         },
         'model_encoder': str(policy_cfg.encoder.encoder_type),
+        'model_encoder_max_positions': int(policy_cfg.encoder.max_positions),
         'cache_variation': int(key.variation),
         'workspace_bounds': workspace_bounds,
     }
@@ -733,7 +734,15 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
 
     logging.info('Online eval | task=%s variation=%d checkpoint=%s', task_name, variation, checkpoint_path)
     logging.info('Resolved data cfg: K=%d L=%d T_obs=%d H=%d stride=%d traj_len=%d action=%s', data_cfg.K, data_cfg.L, data_cfg.T_obs, data_cfg.H, data_cfg.stride, data_cfg.traj_len, data_cfg.action_representation)
-    logging.info('Model: encoder=%s params_step=%s action_dim=%d state_dim=%d points=%d', policy_cfg.encoder.encoder_type, ckpt.get('step', None), action_dim, state_dim, num_points)
+    logging.info(
+        'Model: encoder=%s max_positions=%d params_step=%s action_dim=%d state_dim=%d points=%d',
+        policy_cfg.encoder.encoder_type,
+        int(policy_cfg.encoder.max_positions),
+        ckpt.get('step', None),
+        action_dim,
+        state_dim,
+        num_points,
+    )
     logging.info('Live point filtering: num_points=%d workspace_bounds=%s query_stride_mode=%s', int(cfg.conditioning.num_points), workspace_bounds, query_mode)
 
     env = None

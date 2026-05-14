@@ -27,7 +27,7 @@ class EncoderConfig:
     supernode_temperature: float = 0.02
     supernode_layers: int = 2
     traj_layers: int = 1
-    max_positions: int = 2048
+    max_positions: int = 0
     mask_id_vocab: int = 256
     use_rgb: bool = True
     use_mask_id: bool = False
@@ -147,6 +147,12 @@ class TrajectoryTokenizer(nn.Module):
         B, K, T, _ = traj.shape
         d = int(self.cfg.d_model)
         x = nn.Dense(d, name='action_proj')(traj.astype(jnp.float32))
+        max_positions = int(self.cfg.max_positions)
+        if max_positions < max(int(T), int(K)):
+            raise ValueError(
+                f'encoder.max_positions={max_positions} is too small for trajectory tokens '
+                f'(traj_len={int(T)}, K={int(K)}). Set it to 0 to infer automatically or increase it.'
+            )
         tpos = self.param('traj_pos', nn.initializers.normal(stddev=0.02), (int(self.cfg.max_positions), d))[:T]
         dpos = self.param('traj_demo_pos', nn.initializers.normal(stddev=0.02), (int(self.cfg.max_positions), d))[:K]
         x = x + tpos[None, None, :, :] + dpos[None, :, None, :]
@@ -193,6 +199,13 @@ class ContextEncoder(nn.Module):
         Ttok = int(frame_tokens.shape[1])
         tokens = frame_tokens.reshape(B, F * Ttok, int(self.cfg.d_model))
         mask = frame_mask.reshape(B, F * Ttok)
+        needed_positions = F * Ttok
+        if int(self.cfg.max_positions) < int(needed_positions):
+            raise ValueError(
+                f'encoder.max_positions={int(self.cfg.max_positions)} is too small for {role} tokens '
+                f'({needed_positions}=frames {F} * tokens_per_frame {Ttok}). '
+                'Set it to 0 to infer automatically or increase it.'
+            )
         pos = self.param(f'{role}_pos', nn.initializers.normal(stddev=0.02), (int(self.cfg.max_positions), int(self.cfg.d_model)))[: F * Ttok]
         tokens = tokens + pos[None, :, :]
         return tokens, mask
