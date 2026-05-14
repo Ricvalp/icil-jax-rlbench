@@ -15,6 +15,7 @@ class DecoderConfig:
     d_model: int = 256
     n_heads: int = 4
     n_layers: int = 4
+    context_mode: str = 'single_ctx'  # single_ctx | two_ctx
     mlp_mult: int = 4
     dropout: float = 0.0
 
@@ -57,46 +58,82 @@ class ActionDecoder(nn.Module):
         B = int(query_tokens.shape[0])
         action_queries = self.param('action_queries', nn.initializers.normal(stddev=0.02), (int(self.H), d))
         x = jnp.broadcast_to(action_queries[None, :, :], (B, int(self.H), d))
-        query_len = int(query_tokens.shape[1])
-        if support_tokens is None:
-            context = query_tokens
-            context_mask = query_mask
-        else:
-            context = jnp.concatenate([query_tokens, support_tokens], axis=1)
-            if query_mask is None and support_mask is None:
-                context_mask = None
-            else:
-                qmask = jnp.ones(query_tokens.shape[:2], dtype=jnp.bool_) if query_mask is None else query_mask
-                smask = jnp.ones(support_tokens.shape[:2], dtype=jnp.bool_) if support_mask is None else support_mask
-                context_mask = jnp.concatenate([qmask, smask], axis=1)
         tx = self.cfg.tx()
         entropies = []
         max_probs = []
         raw_max_probs = []
         masses = []
         query_entropies = []
-        for i in range(int(self.cfg.n_layers)):
-            x = SelfAttentionBlock(tx, name=f'self_{i}')(x, train=train)
-            if return_attn_stats:
-                x, weights = CrossAttentionBlock(tx, name=f'cross_{i}')(
-                    x, context, kv_mask=context_mask, train=train, return_weights=True
-                )
-                query_stats = self._query_attention_stats(weights, query_len=query_len, query_mask=query_mask)
-                query_entropies.append(query_stats['attn_query_entropy'])
-                if support_tokens is None:
-                    zero = jnp.asarray(0.0, dtype=jnp.float32)
-                    entropies.append(zero)
-                    max_probs.append(zero)
-                    raw_max_probs.append(zero)
-                    masses.append(zero)
-                else:
-                    stats = self._memory_attention_stats(weights, query_len=query_len, support_mask=support_mask)
-                    entropies.append(stats['attn_memory_entropy'])
-                    max_probs.append(stats['attn_memory_max'])
-                    raw_max_probs.append(stats['attn_memory_raw_max'])
-                    masses.append(stats['attn_memory_mass'])
+        mode = str(self.cfg.context_mode)
+        if mode == 'single_ctx':
+            query_len = int(query_tokens.shape[1])
+            if support_tokens is None:
+                context = query_tokens
+                context_mask = query_mask
             else:
-                x = CrossAttentionBlock(tx, name=f'cross_{i}')(x, context, kv_mask=context_mask, train=train)
+                context = jnp.concatenate([query_tokens, support_tokens], axis=1)
+                if query_mask is None and support_mask is None:
+                    context_mask = None
+                else:
+                    qmask = jnp.ones(query_tokens.shape[:2], dtype=jnp.bool_) if query_mask is None else query_mask
+                    smask = jnp.ones(support_tokens.shape[:2], dtype=jnp.bool_) if support_mask is None else support_mask
+                    context_mask = jnp.concatenate([qmask, smask], axis=1)
+            for i in range(int(self.cfg.n_layers)):
+                x = SelfAttentionBlock(tx, name=f'self_{i}')(x, train=train)
+                if return_attn_stats:
+                    x, weights = CrossAttentionBlock(tx, name=f'cross_{i}')(
+                        x, context, kv_mask=context_mask, train=train, return_weights=True
+                    )
+                    query_stats = self._query_attention_stats(weights, query_len=query_len, query_mask=query_mask)
+                    query_entropies.append(query_stats['attn_query_entropy'])
+                    if support_tokens is None:
+                        zero = jnp.asarray(0.0, dtype=jnp.float32)
+                        entropies.append(zero)
+                        max_probs.append(zero)
+                        raw_max_probs.append(zero)
+                        masses.append(zero)
+                    else:
+                        stats = self._memory_attention_stats(weights, query_len=query_len, support_mask=support_mask)
+                        entropies.append(stats['attn_memory_entropy'])
+                        max_probs.append(stats['attn_memory_max'])
+                        raw_max_probs.append(stats['attn_memory_raw_max'])
+                        masses.append(stats['attn_memory_mass'])
+                else:
+                    x = CrossAttentionBlock(tx, name=f'cross_{i}')(x, context, kv_mask=context_mask, train=train)
+        elif mode == 'two_ctx':
+            for i in range(int(self.cfg.n_layers)):
+                x = SelfAttentionBlock(tx, name=f'self_{i}')(x, train=train)
+                if return_attn_stats:
+                    x, query_weights = CrossAttentionBlock(tx, name=f'query_cross_{i}')(
+                        x, query_tokens, kv_mask=query_mask, train=train, return_weights=True
+                    )
+                    query_stats = self._context_attention_stats(query_weights, query_mask)
+                    query_entropies.append(query_stats['attn_entropy'])
+                    if support_tokens is None:
+                        zero = jnp.asarray(0.0, dtype=jnp.float32)
+                        entropies.append(zero)
+                        max_probs.append(zero)
+                        raw_max_probs.append(zero)
+                        masses.append(zero)
+                    else:
+                        x, memory_weights = CrossAttentionBlock(tx, name=f'support_cross_{i}')(
+                            x, support_tokens, kv_mask=support_mask, train=train, return_weights=True
+                        )
+                        stats = self._context_attention_stats(memory_weights, support_mask)
+                        entropies.append(stats['attn_entropy'])
+                        max_probs.append(stats['attn_max'])
+                        raw_max_probs.append(stats['attn_raw_max'])
+                        masses.append(stats['attn_mass'])
+                else:
+                    x = CrossAttentionBlock(tx, name=f'query_cross_{i}')(
+                        x, query_tokens, kv_mask=query_mask, train=train
+                    )
+                    if support_tokens is not None:
+                        x = CrossAttentionBlock(tx, name=f'support_cross_{i}')(
+                            x, support_tokens, kv_mask=support_mask, train=train
+                        )
+        else:
+            raise ValueError("decoder.context_mode must be 'single_ctx' or 'two_ctx'.")
         x = nn.LayerNorm(name='out_ln')(x)
         pred = nn.Dense(int(self.action_dim), name='action_head')(x)
         if return_attn_stats:
@@ -109,6 +146,27 @@ class ActionDecoder(nn.Module):
             }
             return pred, stats
         return pred
+
+    def _context_attention_stats(self, weights: jnp.ndarray, mask: Optional[jnp.ndarray]):
+        # weights=[B, heads, action_queries, context_tokens].
+        context_w = weights.astype(jnp.float32)
+        if mask is not None:
+            cmask = mask.astype(jnp.bool_)[:, None, None, :]
+            context_w = jnp.where(cmask, context_w, 0.0)
+            valid_count = jnp.sum(mask.astype(jnp.float32), axis=-1)
+        else:
+            valid_count = jnp.full((weights.shape[0],), weights.shape[-1], dtype=jnp.float32)
+        mass = jnp.sum(context_w, axis=-1)
+        context_dist = context_w / (mass[..., None] + 1e-8)
+        entropy = -jnp.sum(jnp.where(context_dist > 0.0, context_dist * jnp.log(context_dist + 1e-8), 0.0), axis=-1)
+        norm = jnp.log(jnp.maximum(valid_count, 2.0))[:, None, None]
+        entropy = jnp.where(mass > 1e-8, entropy / norm, 0.0)
+        return {
+            'attn_entropy': jnp.mean(entropy),
+            'attn_max': jnp.mean(jnp.max(context_dist, axis=-1)),
+            'attn_raw_max': jnp.mean(jnp.max(context_w, axis=-1)),
+            'attn_mass': jnp.mean(mass),
+        }
 
     def _query_attention_stats(self, weights: jnp.ndarray, *, query_len: int, query_mask: Optional[jnp.ndarray]):
         # weights=[B, heads, action_queries, query_tokens + support_tokens].
