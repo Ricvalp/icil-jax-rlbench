@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --mem=0
-#SBATCH --time=72:00:00
+#SBATCH --time=48:00:00
 
 set -euo pipefail
 
@@ -27,7 +27,7 @@ else
   echo "Could not find a conda activation script under ${HOME}." >&2
   exit 1
 fi
-conda activate icil-rlbench
+conda activate jax-icil
 
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p sbatch/snellius/logs
@@ -70,21 +70,21 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config.model.decoder.n_layers=4 \
   --config.train.seed=0 \
   --config.train.num_steps=1000000 \
-  --config.train.batch_size=8 \
+  --config.train.batch_size=256 \
   --config.train.lr=1e-4 \
   --config.train.weight_decay=1e-4 \
   --config.train.grad_clip_norm=1.0 \
   --config.train.loss_type=l1 \
   --config.train.log_every=100 \
-  --config.train.ckpt_every=1000 \
-  --config.train.prefetch_workers=4 \
-  --config.train.prefetch_batches=4 \
+  --config.train.ckpt_every=10000 \
+  --config.train.prefetch_workers=8 \
+  --config.train.prefetch_batches=8 \
   --config.train.resume_path='' \
   --config.train.resume_optimizer=True \
   --config.train.resume_rng=True \
   --config.wandb.enable=True \
   --config.wandb.name=pretrain_supernode_preload_snellius \
-  --config.wandb.prediction_log_every=200 \
+  --config.wandb.prediction_log_every=500 \
   --config.wandb.prediction_num_samples=64 \
   --config.wandb.prediction_num_plots=16 \
   --config.train.log_attention_stats=True
