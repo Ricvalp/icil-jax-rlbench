@@ -68,6 +68,7 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config.model.encoder.use_mask_id=False \
   --config.model.encoder.use_traj_tokens=True \
   --config.model.decoder.n_layers=4 \
+  --config.model.decoder.context_mode=two_ctx \
   --config.train.seed=0 \
   --config.train.num_steps=1000000 \
   --config.train.batch_size=256 \

@@ -60,6 +60,7 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
 
     cfg.model.decoder = ConfigDict()
     cfg.model.decoder.n_layers = 4
+    cfg.model.decoder.context_mode = 'single_ctx'  # single_ctx | two_ctx
     cfg.model.decoder.mlp_mult = 4
     cfg.model.decoder.dropout = 0.0
 

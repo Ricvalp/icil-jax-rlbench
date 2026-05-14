@@ -334,8 +334,8 @@ PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/param_m
 
 ## Known Limitations / Open Work
 
-- No evaluation/rollout scripts are implemented yet in this standalone package.
+- Online RLBench rollout eval exists for pretrained direct-regression and param-MAML/FOMAML direct-regression checkpoints.
 - No old checkpoint conversion.
 - Direct-regression only; no full old ICIL feature parity.
 - Supernode tokenizer is a deterministic soft-pooling implementation, not a byte-for-byte clone of any old tokenizer.
-- Data loading is synchronous in the training loop. Optional preload helps small caches; larger datasets may need async/prefetch workers later.
+- Training supports background batch prefetch workers; preload still helps avoid repeated H5 I/O on small enough caches.

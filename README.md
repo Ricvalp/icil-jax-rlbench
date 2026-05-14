@@ -82,7 +82,7 @@ defaults, and JAX runtime flags:
 - `ICIL_CACHE_ROOT`: dense RLBench H5 cache.
 - `ICIL_JAX_RLBENCH_RUN_ROOT`: base directory for run artifacts.
 - `ICIL_JAX_RLBENCH_OUTPUT_DIR`: general output directory.
-- `ICIL_JAX_RLBENCH_CHECKPOINT_DIR`: checkpoint root; configs append the training mode.
+- `ICIL_JAX_RLBENCH_CHECKPOINT_DIR`: checkpoint root; configs append the training mode and the runner appends the W&B run id, or a timestamp when W&B is disabled.
 - `ICIL_JAX_RLBENCH_PROFILE_DIR`: profiling output directory.
 - `ICIL_JAX_RLBENCH_WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`: W&B defaults.
 - `XLA_PYTHON_CLIENT_PREALLOCATE=false` and `PYTHONUNBUFFERED=1`.
@@ -137,6 +137,11 @@ Resume / fine-tune from a pretraining checkpoint while resetting the outer optim
 --config.train.resume_rng=False
 ```
 
+Checkpoints are written under `train.checkpoint_dir/<run-id>`. By default,
+`train.checkpoint_dir` is `${ICIL_JAX_RLBENCH_CHECKPOINT_DIR}/<mode>`, so
+pretraining with W&B enabled saves to `.../checkpoints/pretrain/<wandb-run-id>`.
+When W&B is disabled, the final directory name is the current date and time.
+
 Optional decoder memory-attention logging:
 
 ```bash
@@ -164,3 +169,29 @@ At each logging step it samples pretrain-style batches from the training task
 pool and, if `data.exclude_tasks` is set, from the excluded task pool. It logs
 `eval/train_mse`, optional `eval/excluded_mse`, and Plotly 3D action-chunk
 figures comparing decoded predicted XYZ chunks with ground truth chunks.
+
+## Online RLBench Evaluation
+
+Pretrained/direct checkpoint:
+
+```bash
+PYTHONPATH=. python -m icil_jax_rlbench.eval.pretrained_direct_regression \
+  --config=icil_jax_rlbench/configs/eval_online_pretrained.py \
+  --config.checkpoint_path=eval_checkpoints/zzpdg8kj/step_0070000.pkl \
+  --config.task.name=push_button \
+  --config.task.variation=0
+```
+
+Param-MAML/FOMAML checkpoint with fast parameter adaptation from cached support:
+
+```bash
+PYTHONPATH=. python -m icil_jax_rlbench.eval.param_maml_direct_regression \
+  --config=icil_jax_rlbench/configs/eval_online_param_maml.py \
+  --config.checkpoint_path=/path/to/maml/step_XXXXXXX.pkl \
+  --config.task.name=push_button \
+  --config.task.variation=0
+```
+
+Both evaluators use cached support trajectories from `ICIL_CACHE_ROOT` by
+default, JIT the JAX forward path, run RLBench online rollouts, and write
+`summary.json` plus optional videos under `eval_outputs/`.
