@@ -12,8 +12,8 @@
 
 set -euo pipefail
 
-# Edit this before submitting. The checkpoint must match the model architecture
-# below, especially decoder.context_mode and the encoder token settings.
+# Edit this before submitting. Model architecture and shape-related data knobs
+# are loaded from this checkpoint when resume_config_from_checkpoint=True below.
 PRETRAINED_CHECKPOINT="/projects/prjs1905/robotics/rlbench/icil_jax_rlbench_runs/checkpoints/pretrain/1snk0gkb/step_0400000.pkl"
 
 if [[ "$PRETRAINED_CHECKPOINT" == "/path/to/pretrained/checkpoint.pkl" || ! -f "$PRETRAINED_CHECKPOINT" ]]; then
@@ -50,26 +50,6 @@ srun --gres=gpu:2 python -m icil_jax_rlbench.param_maml_direct_regression \
   --config.data.keep_open=False \
   --config.data.task_sampling=variation_power \
   --config.data.task_sampling_alpha=0.8 \
-  --config.model.encoder.d_model=256 \
-  --config.model.encoder.n_heads=4 \
-  --config.model.encoder.dropout=0.0 \
-  --config.model.encoder.mlp_mult=4 \
-  --config.model.encoder.frame_layers=2 \
-  --config.model.encoder.query_layers=1 \
-  --config.model.encoder.support_layers=2 \
-  --config.model.encoder.traj_layers=1 \
-  --config.model.encoder.supernodes=64 \
-  --config.model.encoder.supernode_temperature=0.02 \
-  --config.model.encoder.supernode_layers=2 \
-  --config.model.encoder.query_num_latents=64 \
-  --config.model.encoder.support_num_latents=256 \
-  --config.model.encoder.use_support_tokens=True \
-  --config.model.encoder.use_rgb=True \
-  --config.model.encoder.use_mask_id=False \
-  --config.model.encoder.use_traj_tokens=True \
-  --config.model.decoder.n_layers=4 \
-  --config.model.decoder.context_mode=two_ctx \
-  --config.maml.inner_steps=2 \
   --config.maml.inner_steps=1 \
   --config.maml.num_inner_queries=4 \
   --config.maml.num_query_loss_samples=4 \
