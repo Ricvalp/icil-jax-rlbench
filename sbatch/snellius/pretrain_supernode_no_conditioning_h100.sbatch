@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=rlbench_supernode_preload
-#SBATCH --output=sbatch/snellius/logs/rlbench_supernode_preload-%j.out
-#SBATCH --error=sbatch/snellius/logs/rlbench_supernode_preload-%j.err
+#SBATCH --job-name=rlbench_no_conditioning
+#SBATCH --output=sbatch/snellius/logs/rlbench_no_conditioning-%j.out
+#SBATCH --error=sbatch/snellius/logs/rlbench_no_conditioning-%j.err
 #SBATCH --partition=gpu_h100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -11,9 +11,6 @@
 #SBATCH --time=48:00:00
 
 set -euo pipefail
-
-# Submit from the package/repo directory:
-#   sbatch sbatch/snellius/pretrain_supernode_preload_h100.sbatch
 
 if [[ -f "${HOME}/miniforge3/etc/profile.d/conda.sh" ]]; then
   source "${HOME}/miniforge3/etc/profile.d/conda.sh"
@@ -42,12 +39,12 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config=icil_jax_rlbench/configs/pretrain_supernode.py \
   --config.data.preload_to_memory=True \
   --config.data.keep_open=False \
-  --config.data.K=2 \
-  --config.data.L=8 \
+  --config.data.K=1 \
+  --config.data.L=1 \
   --config.data.T_obs=2 \
   --config.data.H=16 \
   --config.data.stride=2 \
-  --config.data.traj_len=512 \
+  --config.data.traj_len=0 \
   --config.data.action_representation=absolute \
   --config.data.task_sampling=variation_power \
   --config.data.task_sampling_alpha=0.8 \
@@ -57,19 +54,19 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config.model.encoder.mlp_mult=4 \
   --config.model.encoder.frame_layers=2 \
   --config.model.encoder.query_layers=1 \
-  --config.model.encoder.support_layers=2 \
-  --config.model.encoder.traj_layers=1 \
+  --config.model.encoder.support_layers=0 \
+  --config.model.encoder.traj_layers=0 \
   --config.model.encoder.supernodes=64 \
   --config.model.encoder.supernode_temperature=0.02 \
   --config.model.encoder.supernode_layers=2 \
   --config.model.encoder.query_num_latents=64 \
-  --config.model.encoder.support_num_latents=256 \
-  --config.model.encoder.use_support_tokens=True \
+  --config.model.encoder.support_num_latents=0 \
+  --config.model.encoder.use_support_tokens=False \
   --config.model.encoder.use_rgb=True \
   --config.model.encoder.use_mask_id=False \
-  --config.model.encoder.use_traj_tokens=True \
+  --config.model.encoder.use_traj_tokens=False \
   --config.model.decoder.n_layers=4 \
-  --config.model.decoder.context_mode=two_ctx \
+  --config.model.decoder.context_mode=single_ctx \
   --config.train.seed=0 \
   --config.train.num_steps=1000000 \
   --config.train.batch_size=256 \
@@ -85,7 +82,7 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config.train.resume_optimizer=True \
   --config.train.resume_rng=True \
   --config.wandb.enable=True \
-  --config.wandb.name=pretrain_supernode_preload_snellius \
+  --config.wandb.name=pretrain_supernode_no_conditioning_snellius \
   --config.wandb.prediction_log_every=500 \
   --config.wandb.prediction_num_samples=64 \
   --config.wandb.prediction_num_plots=16 \

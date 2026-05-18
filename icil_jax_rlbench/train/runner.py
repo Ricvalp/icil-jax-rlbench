@@ -103,6 +103,21 @@ def _step_config(cfg: ConfigDict) -> StepConfig:
     )
 
 
+def _resume_checkpoint_max_positions(cfg: ConfigDict) -> int:
+    resume = str(getattr(cfg.train, 'resume_path', '') or '')
+    if not resume:
+        return 0
+    try:
+        ckpt = load_checkpoint(resume)
+    except FileNotFoundError:
+        return 0
+    ckpt_cfg = ConfigDict(ckpt.get('config', {}) or {})
+    try:
+        return int(ckpt_cfg.model.encoder.max_positions)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
 def _init_state(model: DirectRegressionPolicy, init_batch: Dict[str, Any], cfg: ConfigDict, seed: int) -> TrainState:
     rng = jax.random.PRNGKey(int(seed))
     variables = model.init({'params': rng, 'dropout': rng}, init_batch, train=True)
@@ -314,7 +329,16 @@ def train(mode: str, cfg: ConfigDict) -> None:
         logging.info('Prediction eval excluded tasks: tasks=%d variations=%d', len(excluded_selected), len(excluded_keys))
     else:
         logging.info('No data.exclude_tasks configured; skipping excluded-task prediction eval.')
+    requested_max_positions = int(getattr(cfg.model.encoder, 'max_positions', 0))
     policy_cfg = policy_config_from(cfg.model, H=data_cfg.H, data_cfg=data_cfg)
+    resume_max_positions = _resume_checkpoint_max_positions(cfg)
+    if requested_max_positions <= 0 and resume_max_positions > int(policy_cfg.encoder.max_positions):
+        cfg.model.encoder.max_positions = int(resume_max_positions)
+        policy_cfg = policy_config_from(cfg.model, H=data_cfg.H, data_cfg=data_cfg)
+        logging.info(
+            'Using resume checkpoint encoder.max_positions=%d for parameter shape compatibility.',
+            int(resume_max_positions),
+        )
     cfg.model.encoder.max_positions = int(policy_cfg.encoder.max_positions)
     logging.info('Resolved encoder.max_positions=%d', int(policy_cfg.encoder.max_positions))
     model = DirectRegressionPolicy(policy_cfg, state_dim=state_dim, action_dim=action_dim)

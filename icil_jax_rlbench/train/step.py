@@ -247,13 +247,23 @@ def create_memory_maml_step(model: DirectRegressionPolicy, cfg: StepConfig) -> C
             return pred, {}
 
         def one_task(params, memory_init_batch, task_inner, task_query, task_rng):
-            mem_b, mem_mask_b = model.apply(
-                {'params': params},
-                _with_batch_dim(memory_init_batch),
-                train=True,
-                method=DirectRegressionPolicy.encode_support,
-                rngs={'dropout': task_rng},
-            )
+            if bool(cfg.log_attention_stats):
+                mem_b, mem_mask_b, support_attn_stats = model.apply(
+                    {'params': params},
+                    _with_batch_dim(memory_init_batch),
+                    train=True,
+                    method=DirectRegressionPolicy.encode_support_with_stats,
+                    rngs={'dropout': task_rng},
+                )
+            else:
+                mem_b, mem_mask_b = model.apply(
+                    {'params': params},
+                    _with_batch_dim(memory_init_batch),
+                    train=True,
+                    method=DirectRegressionPolicy.encode_support,
+                    rngs={'dropout': task_rng},
+                )
+                support_attn_stats = {}
             memory = mem_b[0]
             memory_mask = mem_mask_b[0]
             initial_memory = memory
@@ -297,6 +307,7 @@ def create_memory_maml_step(model: DirectRegressionPolicy, cfg: StepConfig) -> C
                 'improvement': before - after,
                 'memory_delta_norm': mem_delta,
                 'memory_relative_delta_norm': rel_mem_delta,
+                **support_attn_stats,
                 **attn_stats,
             }
 

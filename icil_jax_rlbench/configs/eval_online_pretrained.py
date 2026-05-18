@@ -46,7 +46,7 @@ def get_config():
     cfg.sim.collision_checking = False
 
     cfg.control = ConfigDict()
-    cfg.control.execute_actions_per_plan = 16
+    cfg.control.execute_actions_per_plan = 4
     cfg.control.normalize_quaternion = True
     cfg.control.discretize_gripper = True
 

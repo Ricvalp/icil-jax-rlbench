@@ -66,6 +66,7 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config.model.encoder.supernode_layers=2 \
   --config.model.encoder.query_num_latents=16 \
   --config.model.encoder.support_num_latents=64 \
+  --config.model.encoder.use_support_tokens=True \
   --config.model.encoder.use_rgb=True \
   --config.model.encoder.use_mask_id=False \
   --config.model.encoder.use_traj_tokens=True \

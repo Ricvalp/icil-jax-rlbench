@@ -35,13 +35,32 @@ class LatentPerceiver(nn.Module):
     cfg: PerceiverConfig
 
     @nn.compact
-    def __call__(self, tokens: jnp.ndarray, *, token_mask: Optional[jnp.ndarray] = None, train: bool = False) -> jnp.ndarray:
+    def __call__(
+        self,
+        tokens: jnp.ndarray,
+        *,
+        token_mask: Optional[jnp.ndarray] = None,
+        train: bool = False,
+        return_attn_weights: bool = False,
+    ) -> jnp.ndarray:
         B = int(tokens.shape[0])
         lat = self.param('latents', nn.initializers.normal(stddev=0.02), (int(self.cfg.num_latents), int(self.cfg.d_model)), self.cfg.param_dtype)
         z = jnp.broadcast_to(lat.astype(self.cfg.dtype)[None, :, :], (B, int(self.cfg.num_latents), int(self.cfg.d_model)))
         tx = self.cfg.tx()
+        weights = []
         for i in range(int(self.cfg.n_layers)):
-            z = CrossAttentionBlock(tx, name=f'cross_{i}')(z, tokens, kv_mask=token_mask, train=train)
+            if return_attn_weights:
+                z, layer_weights = CrossAttentionBlock(tx, name=f'cross_{i}')(
+                    z, tokens, kv_mask=token_mask, train=train, return_weights=True
+                )
+                weights.append(layer_weights)
+            else:
+                z = CrossAttentionBlock(tx, name=f'cross_{i}')(z, tokens, kv_mask=token_mask, train=train)
+        if return_attn_weights:
+            if weights:
+                return z, jnp.stack(weights, axis=0)
+            empty = jnp.zeros((0, B, int(self.cfg.n_heads), int(self.cfg.num_latents), int(tokens.shape[1])), dtype=self.cfg.dtype)
+            return z, empty
         return z
 
 

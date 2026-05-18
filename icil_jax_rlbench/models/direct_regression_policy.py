@@ -216,13 +216,36 @@ class DirectRegressionPolicy(nn.Module):
         self.decoder = ActionDecoder(self.cfg.decoder, int(self.cfg.H), self.action_dim, name='decoder')
 
     def __call__(self, batch: Dict[str, jnp.ndarray], *, train: bool = False, return_attn_stats: bool = False):
-        support_tokens, support_mask = self.encode_support(batch, train=train)
+        support_stats = {}
+        if bool(self.cfg.encoder.use_support_tokens):
+            if return_attn_stats:
+                support_tokens, support_mask, support_stats = self.encoder.encode_support(
+                    batch, train=train, return_attn_stats=True
+                )
+            else:
+                support_tokens, support_mask = self.encode_support(batch, train=train)
+        else:
+            support_tokens, support_mask = None, None
+            if return_attn_stats:
+                zero = jnp.asarray(0.0, dtype=jnp.float32)
+                support_stats = {
+                    'attn_support_input_mass': zero,
+                    'attn_support_input_entropy': zero,
+                    'attn_support_input_max': zero,
+                    'attn_traj_input_mass': zero,
+                    'attn_traj_input_entropy': zero,
+                    'attn_traj_input_max': zero,
+                }
         if return_attn_stats:
-            return self.predict_with_memory_and_stats(batch, support_tokens, support_mask=support_mask, train=train)
+            pred, decoder_stats = self.predict_with_memory_and_stats(batch, support_tokens, support_mask=support_mask, train=train)
+            return pred, {**support_stats, **decoder_stats}
         return self.predict_with_memory(batch, support_tokens, support_mask=support_mask, train=train)
 
     def encode_support(self, batch: Dict[str, jnp.ndarray], *, train: bool = False) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return self.encoder.encode_support(batch, train=train)
+
+    def encode_support_with_stats(self, batch: Dict[str, jnp.ndarray], *, train: bool = False):
+        return self.encoder.encode_support(batch, train=train, return_attn_stats=True)
 
     def encode_query(self, batch: Dict[str, jnp.ndarray], *, train: bool = False) -> Tuple[jnp.ndarray, jnp.ndarray]:
         return self.encoder.encode_query(batch, train=train)

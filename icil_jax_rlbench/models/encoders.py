@@ -29,6 +29,7 @@ class EncoderConfig:
     traj_layers: int = 1
     max_positions: int = 0
     mask_id_vocab: int = 256
+    use_support_tokens: bool = True
     use_rgb: bool = True
     use_mask_id: bool = False
     use_traj_tokens: bool = True
@@ -168,6 +169,59 @@ class ContextEncoder(nn.Module):
     state_dim: int
     action_dim: int
 
+    def _segment_attention_stats(
+        self,
+        weights: jnp.ndarray,
+        mask: Optional[jnp.ndarray],
+        *,
+        prefix: str,
+    ) -> Dict[str, jnp.ndarray]:
+        # weights=[layers,B,heads,latents,tokens].
+        if int(weights.shape[-1]) == 0:
+            zero = jnp.asarray(0.0, dtype=jnp.float32)
+            return {
+                f'attn_{prefix}_input_mass': zero,
+                f'attn_{prefix}_input_entropy': zero,
+                f'attn_{prefix}_input_max': zero,
+            }
+        w = weights.astype(jnp.float32)
+        if mask is not None:
+            m = mask.astype(jnp.bool_)[:, None, None, None, :]
+            w = jnp.where(m, w, 0.0)
+            valid_count = jnp.sum(mask.astype(jnp.float32), axis=-1)
+        else:
+            valid_count = jnp.full((weights.shape[1],), int(weights.shape[-1]), dtype=jnp.float32)
+        mass = jnp.sum(w, axis=-1)
+        dist = w / (mass[..., None] + 1e-8)
+        entropy = -jnp.sum(jnp.where(dist > 0.0, dist * jnp.log(dist + 1e-8), 0.0), axis=-1)
+        norm = jnp.log(jnp.maximum(valid_count, 2.0))[None, :, None, None]
+        entropy = jnp.where(mass > 1e-8, entropy / norm, 0.0)
+        return {
+            f'attn_{prefix}_input_mass': jnp.mean(mass),
+            f'attn_{prefix}_input_entropy': jnp.mean(entropy),
+            f'attn_{prefix}_input_max': jnp.mean(jnp.max(dist, axis=-1)),
+        }
+
+    def _support_traj_attention_stats(
+        self,
+        weights: jnp.ndarray,
+        mask: jnp.ndarray,
+        *,
+        support_token_count: int,
+    ) -> Dict[str, jnp.ndarray]:
+        support_len = int(support_token_count)
+        support_stats = self._segment_attention_stats(
+            weights[..., :support_len],
+            None if mask is None else mask[:, :support_len],
+            prefix='support',
+        )
+        traj_stats = self._segment_attention_stats(
+            weights[..., support_len:],
+            None if mask is None else mask[:, support_len:],
+            prefix='traj',
+        )
+        return {**support_stats, **traj_stats}
+
     def _tokenize_frames(
         self,
         xyz: jnp.ndarray,
@@ -211,7 +265,25 @@ class ContextEncoder(nn.Module):
         return tokens, mask
 
     @nn.compact
-    def encode_support(self, batch: Dict[str, jnp.ndarray], *, train: bool = False) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def encode_support(
+        self,
+        batch: Dict[str, jnp.ndarray],
+        *,
+        train: bool = False,
+        return_attn_stats: bool = False,
+    ):
+        if not bool(self.cfg.use_support_tokens):
+            if return_attn_stats:
+                zero = jnp.asarray(0.0, dtype=jnp.float32)
+                return None, None, {
+                    'attn_support_input_mass': zero,
+                    'attn_support_input_entropy': zero,
+                    'attn_support_input_max': zero,
+                    'attn_traj_input_mass': zero,
+                    'attn_traj_input_entropy': zero,
+                    'attn_traj_input_max': zero,
+                }
+            return None, None
         xyz = batch['cond_xyz']
         B, K, L = int(xyz.shape[0]), int(xyz.shape[1]), int(xyz.shape[2])
         rgb = batch.get('cond_rgb')
@@ -225,18 +297,37 @@ class ContextEncoder(nn.Module):
             role='support',
             train=train,
         )
+        support_token_count = int(tokens.shape[1])
         if bool(self.cfg.use_traj_tokens) and 'cond_traj' in batch:
             traj_tokens, traj_mask = TrajectoryTokenizer(self.cfg, self.action_dim, name='traj_tokenizer')(
                 batch['cond_traj'], batch['cond_traj_mask'], train=train
             )
             tokens = jnp.concatenate([tokens, traj_tokens], axis=1)
             mask = jnp.concatenate([mask, traj_mask], axis=1)
+        stats: Dict[str, jnp.ndarray] = {}
         if int(self.cfg.support_num_latents) > 0:
-            tokens = LatentPerceiver(
+            compressor = LatentPerceiver(
                 self.cfg.perceiver(num_latents=int(self.cfg.support_num_latents), n_layers=int(self.cfg.support_layers)),
                 name='support_compressor',
-            )(tokens, token_mask=mask, train=train)
+            )
+            if return_attn_stats:
+                tokens, weights = compressor(tokens, token_mask=mask, train=train, return_attn_weights=True)
+                stats = self._support_traj_attention_stats(weights, mask, support_token_count=support_token_count)
+            else:
+                tokens = compressor(tokens, token_mask=mask, train=train)
             mask = jnp.ones((tokens.shape[0], tokens.shape[1]), dtype=jnp.bool_)
+        elif return_attn_stats:
+            zero = jnp.asarray(0.0, dtype=jnp.float32)
+            stats = {
+                'attn_support_input_mass': zero,
+                'attn_support_input_entropy': zero,
+                'attn_support_input_max': zero,
+                'attn_traj_input_mass': zero,
+                'attn_traj_input_entropy': zero,
+                'attn_traj_input_max': zero,
+            }
+        if return_attn_stats:
+            return tokens, mask, stats
         return tokens, mask
 
     @nn.compact
