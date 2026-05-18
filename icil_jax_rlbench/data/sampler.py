@@ -161,12 +161,15 @@ class ICILSampler:
         obs_idx, act_idx = self._obs_act_indices(t0, T)
         obs = self.store.load_episode_slices(vidx, int(episode_id), obs_idx, load_rgb=load_rgb, load_mask_id=load_mask_id)
         act = self.store.load_episode_slices(vidx, int(episode_id), act_idx, load_rgb=False, load_mask_id=False)
+        task_id, task_variation_id = self.store.class_ids_for_vidx(vidx)
         out: Dict[str, np.ndarray] = {
             'query_xyz': obs['xyz'].astype(np.float32),
             'query_state': obs['state'].astype(np.float32),
             'query_valid': obs['valid'].astype(np.bool_),
             'target_action': encode_action_chunk(act['action'], query_state=obs['state'], representation=self.cfg.action_representation).astype(np.float32),
             'chunk_start': np.asarray(float(t0), dtype=np.float32),
+            'task_id': np.asarray(task_id, dtype=np.int32),
+            'task_variation_id': np.asarray(task_variation_id, dtype=np.int32),
         }
         if load_rgb and 'rgb' in obs:
             out['query_rgb'] = obs['rgb'].astype(np.float32)

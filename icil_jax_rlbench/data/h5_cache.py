@@ -59,6 +59,10 @@ class RLBenchCacheStore:
 
     def __init__(self, keys: Sequence[VariationKey], *, keep_open: bool = True, preload_to_memory: bool = False):
         self.keys = list(keys)
+        self.task_names = tuple(sorted({key.task for key in self.keys}))
+        self.task_to_id = {task: idx for idx, task in enumerate(self.task_names)}
+        self.task_variation_keys = tuple(f'{key.task}:{int(key.variation)}' for key in self.keys)
+        self.task_variation_to_id = {key: idx for idx, key in enumerate(self.task_variation_keys)}
         self.keep_open = bool(keep_open) and not bool(preload_to_memory)
         self.preload_to_memory = bool(preload_to_memory)
         self._handles: Dict[int, h5py.File] = {}
@@ -200,3 +204,9 @@ class RLBenchCacheStore:
         for vidx, key in enumerate(self.keys):
             out.setdefault(key.task, []).append(vidx)
         return out
+
+    def class_ids_for_vidx(self, vidx: int) -> Tuple[int, int]:
+        key = self.keys[int(vidx)]
+        task_id = self.task_to_id[key.task]
+        task_variation_id = self.task_variation_to_id[f'{key.task}:{int(key.variation)}']
+        return int(task_id), int(task_variation_id)

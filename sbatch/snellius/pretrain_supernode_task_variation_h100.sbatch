@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=rlbench_no_conditioning
-#SBATCH --output=sbatch/snellius/logs/rlbench_no_conditioning-%j.out
-#SBATCH --error=sbatch/snellius/logs/rlbench_no_conditioning-%j.err
+#SBATCH --job-name=rlbench_task_variation
+#SBATCH --output=sbatch/snellius/logs/rlbench_task_variation-%j.out
+#SBATCH --error=sbatch/snellius/logs/rlbench_task_variation-%j.err
 #SBATCH --partition=gpu_h100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -34,8 +34,9 @@ export PYTHONPATH="${SLURM_SUBMIT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 echo "CUDA_VISIBLE_DEVICES before srun: ${CUDA_VISIBLE_DEVICES:-unset}"
 srun --gres=gpu:2 nvidia-smi
 srun --gres=gpu:2 python -c 'import jax; backend = jax.default_backend(); print(f"JAX backend: {backend}; devices: {jax.devices()}"); assert backend == "gpu", f"Expected JAX gpu backend, got {backend}"'
+
 srun --gres=gpu:2 python -m icil_jax_rlbench.pretrain_direct_regression \
-  --config=icil_jax_rlbench/configs/pretrain_supernode.py \
+  --config=icil_jax_rlbench/configs/pretrain_supernode_task_variation.py \
   --config.data.preload_to_memory=True \
   --config.data.keep_open=False \
   --config.data.K=1 \
@@ -64,7 +65,9 @@ srun --gres=gpu:2 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config.model.encoder.use_rgb=True \
   --config.model.encoder.use_mask_id=False \
   --config.model.encoder.use_traj_tokens=False \
-  --config.model.conditioning.mode=none \
+  --config.model.conditioning.mode=task_variation \
+  --config.model.conditioning.num_task_tokens=1 \
+  --config.model.conditioning.num_variation_tokens=1 \
   --config.model.decoder.n_layers=4 \
   --config.model.decoder.context_mode=single_ctx \
   --config.train.seed=0 \
@@ -82,7 +85,7 @@ srun --gres=gpu:2 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config.train.resume_optimizer=True \
   --config.train.resume_rng=True \
   --config.wandb.enable=True \
-  --config.wandb.name=pretrain_supernode_no_conditioning_snellius \
+  --config.wandb.name=pretrain_supernode_task_variation_snellius \
   --config.wandb.prediction_log_every=500 \
   --config.wandb.prediction_num_samples=64 \
   --config.wandb.prediction_num_plots=16 \

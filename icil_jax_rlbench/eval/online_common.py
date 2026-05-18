@@ -75,6 +75,29 @@ def _checkpoint_config(ckpt: Dict[str, Any]) -> ConfigDict:
     return ConfigDict(raw or {})
 
 
+def _model_conditioning_mode(model_cfg: Any) -> str:
+    return str(getattr(getattr(model_cfg, 'conditioning', ConfigDict()), 'mode', 'support'))
+
+
+def _task_variation_ids_from_checkpoint(ckpt_cfg: ConfigDict, task_name: str, variation: int) -> Optional[Dict[str, np.ndarray]]:
+    if _model_conditioning_mode(ckpt_cfg.model) != 'task_variation':
+        return None
+    data_cfg = getattr(ckpt_cfg, 'data', ConfigDict())
+    task_names = list(getattr(data_cfg, 'task_id_names', ()))
+    variation_keys = list(getattr(data_cfg, 'task_variation_keys', ()))
+    if not task_names or not variation_keys:
+        raise ValueError('Task-variation checkpoint is missing data.task_id_names or data.task_variation_keys.')
+    variation_key = f'{task_name}:{int(variation)}'
+    if task_name not in task_names:
+        raise ValueError(f'Task {task_name!r} is not in the checkpoint task-token vocabulary.')
+    if variation_key not in variation_keys:
+        raise ValueError(f'Variation {variation_key!r} is not in the checkpoint task-variation-token vocabulary.')
+    return {
+        'task_id': np.asarray([task_names.index(task_name)], dtype=np.int32),
+        'task_variation_id': np.asarray([variation_keys.index(variation_key)], dtype=np.int32),
+    }
+
+
 def _data_config_from_eval_and_checkpoint(cfg: ConfigDict, ckpt: Dict[str, Any]) -> ICILDataConfig:
     ckpt_cfg = _checkpoint_config(ckpt)
     ckpt_data = getattr(ckpt_cfg, 'data', ConfigDict())
@@ -197,6 +220,48 @@ def _sanitize_action(action: np.ndarray, *, normalize_quaternion: bool, discreti
         else:
             out[7] = float(np.clip(out[7], 0.0, 1.0))
     return out
+
+
+def _position_bounds_from_cfg(cfg: ConfigDict) -> Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]:
+    raw = getattr(cfg.control, 'action_position_bounds', _DEFAULT_WORKSPACE_BOUNDS)
+    if len(raw) != 3:
+        raise ValueError('control.action_position_bounds must contain x/y/z bounds.')
+    bounds = []
+    for axis_bounds in raw:
+        if len(axis_bounds) != 2:
+            raise ValueError('Each control.action_position_bounds axis must contain two values.')
+        bounds.append((float(axis_bounds[0]), float(axis_bounds[1])))
+    return bounds[0], bounds[1], bounds[2]
+
+
+def _validate_action_for_planning(
+    action: np.ndarray,
+    current_state: np.ndarray,
+    cfg: ConfigDict,
+) -> Optional[str]:
+    if not np.all(np.isfinite(action)):
+        return f'Predicted non-finite action: {action}'
+    if action.shape[0] < 3:
+        return f'Predicted action has invalid shape: {action.shape}'
+    pos = np.asarray(action[:3], dtype=np.float32)
+    if bool(getattr(cfg.control, 'reject_out_of_bounds_actions', False)):
+        bounds = _position_bounds_from_cfg(cfg)
+        for axis, value, axis_bounds in zip('xyz', pos.tolist(), bounds):
+            if value < axis_bounds[0] or value > axis_bounds[1]:
+                return (
+                    f'Predicted end-effector {axis}={value:.4f} is outside '
+                    f'control.action_position_bounds={bounds}.'
+                )
+    max_delta = float(getattr(cfg.control, 'max_position_delta', 0.0))
+    if max_delta > 0.0:
+        current_pos = np.asarray(current_state[:3], dtype=np.float32)
+        delta = float(np.linalg.norm(pos - current_pos))
+        if delta > max_delta:
+            return (
+                f'Predicted end-effector move is too large: delta={delta:.4f} > '
+                f'control.max_position_delta={max_delta:.4f}.'
+            )
+    return None
 
 
 def _extract_rgb_frame(obs: Any, camera: str) -> np.ndarray:
@@ -520,11 +585,20 @@ def _make_param_adapt_fn(model: DirectRegressionPolicy, *, inner_lr: float, grad
 
 
 class JaxOnlinePolicy:
-    def __init__(self, model: DirectRegressionPolicy, params: Any, data_cfg: ICILDataConfig):
+    def __init__(
+        self,
+        model: DirectRegressionPolicy,
+        params: Any,
+        data_cfg: ICILDataConfig,
+        *,
+        fixed_conditioning: Optional[Dict[str, np.ndarray]] = None,
+    ):
         self.model = model
         self.params = jax.device_put(params)
         self.data_cfg = data_cfg
-        self.uses_support = bool(model.cfg.encoder.use_support_tokens)
+        self.conditioning_mode = str(model.cfg.conditioning.mode)
+        self.uses_support = self.conditioning_mode == 'support' and bool(model.cfg.encoder.use_support_tokens)
+        self.fixed_conditioning = fixed_conditioning or {}
         self.support_tokens = None
         self.support_mask = None
         self._encode_support = jax.jit(
@@ -564,6 +638,8 @@ class JaxOnlinePolicy:
         jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else x, self.support_tokens)
 
     def predict_action_chunk(self, query: Dict[str, np.ndarray]) -> np.ndarray:
+        if self.fixed_conditioning:
+            query = {**query, **self.fixed_conditioning}
         if not self.uses_support:
             pred = self._predict_query_only(self.params, query)
             pred = np.asarray(jax.device_get(pred), dtype=np.float32)
@@ -608,6 +684,11 @@ def _run_episode(
         task_env.set_variation(int(variation))
     _descriptions, obs = task_env.reset()
     history = [processor.observation_to_frame(obs)]
+    logging.info(
+        'Episode %d reset complete | initial_gripper_xyz=%s',
+        episode_index,
+        np.array2string(history[-1]['state'][:3], precision=4),
+    )
     frames: List[np.ndarray] = []
     if _as_bool(cfg.video.enable):
         frames.append(_extract_rgb_frame(obs, str(cfg.video.camera)))
@@ -629,7 +710,20 @@ def _run_episode(
     try:
         while env_steps < max_env_steps and not success and not terminated:
             query = _build_query_window(history, data_cfg=data_cfg, query_stride_mode=query_stride_mode)
+            current_state = np.asarray(query['query_state'][0, -1], dtype=np.float32)
+            predict_start = time.time()
             plan_np = policy.predict_action_chunk(query)[0]
+            predict_s = time.time() - predict_start
+            if env_steps == 0:
+                first_delta = float(np.linalg.norm(plan_np[0, :3] - current_state[:3]))
+                logging.info(
+                    'Episode %d first action chunk | predict_s=%.3f current_xyz=%s first_action_xyz=%s delta=%.4f',
+                    episode_index,
+                    predict_s,
+                    np.array2string(current_state[:3], precision=4),
+                    np.array2string(plan_np[0, :3], precision=4),
+                    first_delta,
+                )
             n_exec = int(min(execute_actions, plan_np.shape[0], max_env_steps - env_steps))
             for i in range(n_exec):
                 action = _sanitize_action(
@@ -637,6 +731,18 @@ def _run_episode(
                     normalize_quaternion=_as_bool(cfg.control.normalize_quaternion),
                     discretize_gripper=_as_bool(cfg.control.discretize_gripper),
                 )
+                invalid_reason = _validate_action_for_planning(action, current_state, cfg)
+                if invalid_reason is not None:
+                    error = invalid_reason
+                    terminated = True
+                    logging.warning('Episode %d rejecting action before RLBench planning | %s', episode_index, invalid_reason)
+                    break
+                if env_steps == 0 and i == 0:
+                    logging.info(
+                        'Episode %d executing first action | action=%s',
+                        episode_index,
+                        np.array2string(action, precision=4),
+                    )
                 try:
                     obs, reward, terminated = task_env.step(action.astype(np.float32))
                 except InvalidActionError as exc:
@@ -652,6 +758,7 @@ def _run_episode(
                     pbar.update(1)
                 success = bool(float(reward) > 0.5)
                 history.append(processor.observation_to_frame(obs))
+                current_state = np.asarray(history[-1]['state'], dtype=np.float32)
                 if _as_bool(cfg.video.enable):
                     frames.append(_extract_rgb_frame(obs, str(cfg.video.camera)))
                 if success or terminated or env_steps >= max_env_steps:
@@ -702,12 +809,13 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         cfg.conditioning.num_points = int(num_points)
 
     policy_cfg = policy_config_from(ckpt_cfg.model, H=data_cfg.H, data_cfg=data_cfg)
-    uses_support = bool(policy_cfg.encoder.use_support_tokens)
+    fixed_conditioning = _task_variation_ids_from_checkpoint(ckpt_cfg, task_name, int(key.variation))
+    uses_support = str(policy_cfg.conditioning.mode) == 'support' and bool(policy_cfg.encoder.use_support_tokens)
     if adaptation == 'param_maml' and not uses_support:
         raise ValueError('Param-MAML online eval requires a checkpoint with model.encoder.use_support_tokens=True.')
     model = DirectRegressionPolicy(policy_cfg, state_dim=state_dim, action_dim=action_dim)
     params = ckpt['params']
-    policy = JaxOnlinePolicy(model, params, data_cfg)
+    policy = JaxOnlinePolicy(model, params, data_cfg, fixed_conditioning=fixed_conditioning)
 
     use_rgb = bool(policy_cfg.encoder.use_rgb)
     use_mask_id = bool(policy_cfg.encoder.use_mask_id)
@@ -741,6 +849,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             'action_representation': str(data_cfg.action_representation),
         },
         'model_encoder': str(policy_cfg.encoder.encoder_type),
+        'model_conditioning_mode': str(policy_cfg.conditioning.mode),
         'model_uses_support_tokens': bool(uses_support),
         'model_encoder_max_positions': int(policy_cfg.encoder.max_positions),
         'cache_variation': int(key.variation),
@@ -753,8 +862,9 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
     logging.info('Online eval | task=%s variation=%d checkpoint=%s', task_name, variation, checkpoint_path)
     logging.info('Resolved data cfg: K=%d L=%d T_obs=%d H=%d stride=%d traj_len=%d action=%s', data_cfg.K, data_cfg.L, data_cfg.T_obs, data_cfg.H, data_cfg.stride, data_cfg.traj_len, data_cfg.action_representation)
     logging.info(
-        'Model: encoder=%s uses_support=%s max_positions=%d params_step=%s action_dim=%d state_dim=%d points=%d',
+        'Model: encoder=%s conditioning=%s uses_support=%s max_positions=%d params_step=%s action_dim=%d state_dim=%d points=%d',
         policy_cfg.encoder.encoder_type,
+        str(policy_cfg.conditioning.mode),
         uses_support,
         int(policy_cfg.encoder.max_positions),
         ckpt.get('step', None),
@@ -763,8 +873,14 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         num_points,
     )
     logging.info('Live point filtering: num_points=%d workspace_bounds=%s query_stride_mode=%s', int(cfg.conditioning.num_points), workspace_bounds, query_mode)
-    if not uses_support:
+    if not uses_support and fixed_conditioning is None:
         logging.info('Checkpoint disables support tokens; online eval will run query-only without cached support demos.')
+    if fixed_conditioning is not None:
+        logging.info(
+            'Checkpoint uses task-variation conditioning without cached support demos: task_id=%d task_variation_id=%d',
+            int(fixed_conditioning['task_id'][0]),
+            int(fixed_conditioning['task_variation_id'][0]),
+        )
 
     env = None
     results: List[Dict[str, Any]] = []

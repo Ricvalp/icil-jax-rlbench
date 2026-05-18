@@ -46,9 +46,12 @@ def get_config():
     cfg.sim.collision_checking = False
 
     cfg.control = ConfigDict()
-    cfg.control.execute_actions_per_plan = 4
+    cfg.control.execute_actions_per_plan = 8
     cfg.control.normalize_quaternion = True
     cfg.control.discretize_gripper = True
+    cfg.control.reject_out_of_bounds_actions = True
+    cfg.control.action_position_bounds = ((-1.0, 1.0), (-1.0, 1.0), (0.0, 2.5))
+    cfg.control.max_position_delta = 0.0
 
     cfg.video = ConfigDict()
     cfg.video.enable = True

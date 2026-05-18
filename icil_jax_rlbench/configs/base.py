@@ -59,6 +59,13 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.model.encoder.use_mask_id = False
     cfg.model.encoder.use_traj_tokens = True
 
+    cfg.model.conditioning = ConfigDict()
+    cfg.model.conditioning.mode = 'support'  # support | none | task_variation
+    cfg.model.conditioning.num_task_tokens = 1
+    cfg.model.conditioning.num_variation_tokens = 1
+    cfg.model.conditioning.num_tasks = 1
+    cfg.model.conditioning.num_task_variations = 1
+
     cfg.model.decoder = ConfigDict()
     cfg.model.decoder.n_layers = 4
     cfg.model.decoder.context_mode = 'single_ctx'  # single_ctx | two_ctx

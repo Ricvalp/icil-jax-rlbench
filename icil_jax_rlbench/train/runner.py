@@ -153,6 +153,26 @@ def _resume_checkpoint_max_positions(cfg: ConfigDict) -> int:
         return 0
 
 
+def _conditioning_mode(cfg: ConfigDict) -> str:
+    return str(getattr(getattr(cfg.model, 'conditioning', ConfigDict()), 'mode', 'support'))
+
+
+def _configure_task_variation_conditioning(cfg: ConfigDict, store: RLBenchCacheStore) -> None:
+    if _conditioning_mode(cfg) != 'task_variation':
+        return
+    cfg.model.conditioning.num_tasks = int(len(store.task_names))
+    cfg.model.conditioning.num_task_variations = int(len(store.task_variation_keys))
+    cfg.data.task_id_names = tuple(store.task_names)
+    cfg.data.task_variation_keys = tuple(store.task_variation_keys)
+    logging.info(
+        'Task-variation conditioning: tasks=%d task_variations=%d task_tokens=%d variation_tokens=%d',
+        int(cfg.model.conditioning.num_tasks),
+        int(cfg.model.conditioning.num_task_variations),
+        int(cfg.model.conditioning.num_task_tokens),
+        int(cfg.model.conditioning.num_variation_tokens),
+    )
+
+
 def _init_state(model: DirectRegressionPolicy, init_batch: Dict[str, Any], cfg: ConfigDict, seed: int) -> TrainState:
     rng = jax.random.PRNGKey(int(seed))
     variables = model.init({'params': rng, 'dropout': rng}, init_batch, train=True)
@@ -352,13 +372,16 @@ def train(mode: str, cfg: ConfigDict) -> None:
         logging.info('Preloaded RLBench cache into RAM: %.2f GiB', store.preloaded_bytes / (1024 ** 3))
     num_points, state_dim, action_dim = store.infer_dims()
     logging.info('RLBench cache: root=%s tasks=%d variations=%d points=%d state_dim=%d action_dim=%d', cfg.data.cache_root, len(selected_tasks), len(keys), num_points, state_dim, action_dim)
+    _configure_task_variation_conditioning(cfg, store)
 
     data_cfg = _data_config(cfg)
     sampler = ICILSampler(store, data_cfg, seed=int(cfg.train.seed))
     train_eval_sampler = ICILSampler(store, data_cfg, seed=int(cfg.train.seed) + 100003)
     excluded_eval_sampler = None
     excluded_store = None
-    if excluded_tasks:
+    if excluded_tasks and _conditioning_mode(cfg) == 'task_variation':
+        logging.info('Skipping excluded-task prediction eval for task-variation conditioning; held-out tasks have no trained class tokens.')
+    elif excluded_tasks:
         excluded_keys, excluded_selected = build_keys(Path(cfg.data.cache_root), tasks=excluded_tasks, exclude_tasks=())
         excluded_store = RLBenchCacheStore(excluded_keys, keep_open=bool(cfg.data.keep_open), preload_to_memory=False)
         excluded_eval_sampler = ICILSampler(excluded_store, data_cfg, seed=int(cfg.train.seed) + 200003)

@@ -29,13 +29,58 @@ class DecoderConfig:
 
 
 @dataclass(frozen=True)
+class ConditioningConfig:
+    mode: str = 'support'  # support | none | task_variation
+    num_task_tokens: int = 1
+    num_variation_tokens: int = 1
+    num_tasks: int = 1
+    num_task_variations: int = 1
+
+
+@dataclass(frozen=True)
 class PolicyConfig:
     encoder: EncoderConfig = EncoderConfig()
     decoder: DecoderConfig = DecoderConfig()
+    conditioning: ConditioningConfig = ConditioningConfig()
     H: int = 16
 
     def with_model_dim(self) -> 'PolicyConfig':
         return replace(self, decoder=replace(self.decoder, d_model=self.encoder.d_model, n_heads=self.encoder.n_heads))
+
+
+class ClassConditioner(nn.Module):
+    cfg: ConditioningConfig
+    d_model: int
+
+    @nn.compact
+    def __call__(self, batch: Dict[str, jnp.ndarray]) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        B = int(batch['query_xyz'].shape[0])
+        d = int(self.d_model)
+        pieces = []
+        if int(self.cfg.num_task_tokens) > 0:
+            table = self.param(
+                'task_tokens',
+                nn.initializers.normal(stddev=0.02),
+                (max(1, int(self.cfg.num_tasks)), int(self.cfg.num_task_tokens), d),
+            )
+            task_id = jnp.asarray(batch['task_id'], dtype=jnp.int32).reshape((B,))
+            task_id = jnp.clip(task_id, 0, max(0, int(self.cfg.num_tasks) - 1))
+            pieces.append(table[task_id])
+        if int(self.cfg.num_variation_tokens) > 0:
+            table = self.param(
+                'variation_tokens',
+                nn.initializers.normal(stddev=0.02),
+                (max(1, int(self.cfg.num_task_variations)), int(self.cfg.num_variation_tokens), d),
+            )
+            variation_id = jnp.asarray(batch['task_variation_id'], dtype=jnp.int32).reshape((B,))
+            variation_id = jnp.clip(variation_id, 0, max(0, int(self.cfg.num_task_variations) - 1))
+            pieces.append(table[variation_id])
+        if not pieces:
+            tokens = jnp.zeros((B, 0, d), dtype=jnp.float32)
+        else:
+            tokens = jnp.concatenate(pieces, axis=1)
+        mask = jnp.ones(tokens.shape[:2], dtype=jnp.bool_)
+        return tokens, mask
 
 
 class ActionDecoder(nn.Module):
@@ -214,10 +259,34 @@ class DirectRegressionPolicy(nn.Module):
     def setup(self) -> None:
         self.encoder = ContextEncoder(self.cfg.encoder, self.state_dim, self.action_dim, name='encoder')
         self.decoder = ActionDecoder(self.cfg.decoder, int(self.cfg.H), self.action_dim, name='decoder')
+        self.class_conditioner = ClassConditioner(
+            self.cfg.conditioning,
+            int(self.cfg.encoder.d_model),
+            name='class_conditioner',
+        )
+
+    def _conditioning_mode(self) -> str:
+        mode = str(self.cfg.conditioning.mode)
+        if mode not in ('support', 'none', 'task_variation'):
+            raise ValueError("conditioning.mode must be 'support', 'none', or 'task_variation'.")
+        return mode
 
     def __call__(self, batch: Dict[str, jnp.ndarray], *, train: bool = False, return_attn_stats: bool = False):
         support_stats = {}
-        if bool(self.cfg.encoder.use_support_tokens):
+        mode = self._conditioning_mode()
+        if mode == 'task_variation':
+            support_tokens, support_mask = self.class_conditioner(batch)
+            if return_attn_stats:
+                zero = jnp.asarray(0.0, dtype=jnp.float32)
+                support_stats = {
+                    'attn_support_input_mass': zero,
+                    'attn_support_input_entropy': zero,
+                    'attn_support_input_max': zero,
+                    'attn_traj_input_mass': zero,
+                    'attn_traj_input_entropy': zero,
+                    'attn_traj_input_max': zero,
+                }
+        elif mode == 'support' and bool(self.cfg.encoder.use_support_tokens):
             if return_attn_stats:
                 support_tokens, support_mask, support_stats = self.encoder.encode_support(
                     batch, train=train, return_attn_stats=True
