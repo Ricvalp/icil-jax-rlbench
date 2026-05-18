@@ -88,6 +88,41 @@ def _data_config(cfg: ConfigDict) -> ICILDataConfig:
     )
 
 
+_RESUME_DATA_FIELDS = (
+    'K',
+    'L',
+    'T_obs',
+    'H',
+    'stride',
+    'traj_len',
+    'action_representation',
+)
+
+
+def _apply_resume_config_from_checkpoint(cfg: ConfigDict) -> None:
+    if not bool(getattr(cfg.train, 'resume_config_from_checkpoint', False)):
+        return
+    resume = str(getattr(cfg.train, 'resume_path', '') or '')
+    if not resume:
+        raise ValueError('train.resume_config_from_checkpoint=True requires train.resume_path.')
+    ckpt = load_checkpoint(resume)
+    ckpt_cfg = ConfigDict(ckpt.get('config', {}) or {})
+    if not hasattr(ckpt_cfg, 'model'):
+        raise ValueError(f'Checkpoint {resume} does not contain config.model.')
+    cfg.model = ConfigDict(ckpt_cfg.model)
+    copied = []
+    if hasattr(ckpt_cfg, 'data'):
+        for field in _RESUME_DATA_FIELDS:
+            if hasattr(ckpt_cfg.data, field):
+                setattr(cfg.data, field, getattr(ckpt_cfg.data, field))
+                copied.append(field)
+    logging.info(
+        'Loaded model config%s from checkpoint: %s',
+        f' and data fields {copied}' if copied else '',
+        resume,
+    )
+
+
 def _step_config(cfg: ConfigDict) -> StepConfig:
     return StepConfig(
         loss_type=str(cfg.train.loss_type),
@@ -309,6 +344,7 @@ def _maybe_log_prediction_eval(
 def train(mode: str, cfg: ConfigDict) -> None:
     if mode not in ('pretrain', 'param_maml', 'memory_maml'):
         raise ValueError(f'Unknown mode={mode!r}')
+    _apply_resume_config_from_checkpoint(cfg)
     excluded_tasks = _tasks(getattr(cfg.data, 'exclude_tasks', ())) or ()
     keys, selected_tasks = build_keys(Path(cfg.data.cache_root), tasks=_tasks(getattr(cfg.data, 'tasks', ())), exclude_tasks=excluded_tasks)
     store = RLBenchCacheStore(keys, keep_open=bool(cfg.data.keep_open), preload_to_memory=bool(cfg.data.preload_to_memory))
