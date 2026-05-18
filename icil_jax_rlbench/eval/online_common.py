@@ -524,6 +524,7 @@ class JaxOnlinePolicy:
         self.model = model
         self.params = jax.device_put(params)
         self.data_cfg = data_cfg
+        self.uses_support = bool(model.cfg.encoder.use_support_tokens)
         self.support_tokens = None
         self.support_mask = None
         self._encode_support = jax.jit(
@@ -544,16 +545,29 @@ class JaxOnlinePolicy:
                 method=DirectRegressionPolicy.predict_with_memory,
             )
         )
+        self._predict_query_only = jax.jit(
+            lambda params, batch: model.apply({'params': params}, batch, train=False)
+        )
 
     def update_params(self, params: Any) -> None:
         self.params = jax.device_put(params)
+        self.support_tokens = None
+        self.support_mask = None
 
     def update_support(self, support: Dict[str, np.ndarray]) -> None:
+        if not self.uses_support:
+            self.support_tokens = None
+            self.support_mask = None
+            return
         batch = {k: v for k, v in support.items() if k != 'meta'}
         self.support_tokens, self.support_mask = self._encode_support(self.params, batch)
         jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else x, self.support_tokens)
 
     def predict_action_chunk(self, query: Dict[str, np.ndarray]) -> np.ndarray:
+        if not self.uses_support:
+            pred = self._predict_query_only(self.params, query)
+            pred = np.asarray(jax.device_get(pred), dtype=np.float32)
+            return decode_action_chunk(pred, query_state=query['query_state'], representation=self.data_cfg.action_representation)
         if self.support_tokens is None or self.support_mask is None:
             raise RuntimeError('Support conditioning has not been encoded.')
         pred = self._predict_with_memory(self.params, query, self.support_tokens, self.support_mask)
@@ -688,6 +702,9 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         cfg.conditioning.num_points = int(num_points)
 
     policy_cfg = policy_config_from(ckpt_cfg.model, H=data_cfg.H, data_cfg=data_cfg)
+    uses_support = bool(policy_cfg.encoder.use_support_tokens)
+    if adaptation == 'param_maml' and not uses_support:
+        raise ValueError('Param-MAML online eval requires a checkpoint with model.encoder.use_support_tokens=True.')
     model = DirectRegressionPolicy(policy_cfg, state_dim=state_dim, action_dim=action_dim)
     params = ckpt['params']
     policy = JaxOnlinePolicy(model, params, data_cfg)
@@ -724,6 +741,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             'action_representation': str(data_cfg.action_representation),
         },
         'model_encoder': str(policy_cfg.encoder.encoder_type),
+        'model_uses_support_tokens': bool(uses_support),
         'model_encoder_max_positions': int(policy_cfg.encoder.max_positions),
         'cache_variation': int(key.variation),
         'workspace_bounds': workspace_bounds,
@@ -735,8 +753,9 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
     logging.info('Online eval | task=%s variation=%d checkpoint=%s', task_name, variation, checkpoint_path)
     logging.info('Resolved data cfg: K=%d L=%d T_obs=%d H=%d stride=%d traj_len=%d action=%s', data_cfg.K, data_cfg.L, data_cfg.T_obs, data_cfg.H, data_cfg.stride, data_cfg.traj_len, data_cfg.action_representation)
     logging.info(
-        'Model: encoder=%s max_positions=%d params_step=%s action_dim=%d state_dim=%d points=%d',
+        'Model: encoder=%s uses_support=%s max_positions=%d params_step=%s action_dim=%d state_dim=%d points=%d',
         policy_cfg.encoder.encoder_type,
+        uses_support,
         int(policy_cfg.encoder.max_positions),
         ckpt.get('step', None),
         action_dim,
@@ -744,6 +763,8 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         num_points,
     )
     logging.info('Live point filtering: num_points=%d workspace_bounds=%s query_stride_mode=%s', int(cfg.conditioning.num_points), workspace_bounds, query_mode)
+    if not uses_support:
+        logging.info('Checkpoint disables support tokens; online eval will run query-only without cached support demos.')
 
     env = None
     results: List[Dict[str, Any]] = []
@@ -761,63 +782,64 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             seed=seed + 11,
         )
         for episode in range(int(cfg.task.num_eval_episodes)):
-            regen = support is None or bool(getattr(cfg.conditioning, 'regenerate_demos_each_episode', False))
-            regen = regen or (adaptation == 'param_maml' and bool(getattr(getattr(cfg, 'adaptation', ConfigDict()), 'regenerate_each_episode', False)))
-            if regen:
-                support = _build_cached_support(
-                    store=store,
-                    sampler=sampler,
-                    data_cfg=data_cfg,
-                    rng=rng,
-                    use_rgb=use_rgb,
-                    use_mask_id=use_mask_id,
-                )
-                adapted_params = params
-                adapt_metrics = None
-                if adaptation == 'param_maml':
-                    maml_cfg = getattr(ckpt_cfg, 'maml', ConfigDict())
-                    eval_adapt = getattr(cfg, 'adaptation', ConfigDict())
-                    inner_steps = int(getattr(eval_adapt, 'inner_steps_override', -1))
-                    if inner_steps < 0:
-                        inner_steps = int(getattr(maml_cfg, 'inner_steps', 1))
-                    num_inner_queries = int(getattr(eval_adapt, 'num_inner_queries', 0))
-                    if num_inner_queries <= 0:
-                        num_inner_queries = int(getattr(maml_cfg, 'num_inner_queries', data_cfg.K))
-                    inner_lr = float(getattr(eval_adapt, 'inner_lr', 0.0))
-                    if inner_lr <= 0.0:
-                        inner_lr = float(getattr(maml_cfg, 'inner_lr', 1e-2))
-                    grad_clip = float(getattr(eval_adapt, 'grad_clip_norm', 0.0))
-                    if grad_clip <= 0.0:
-                        grad_clip = float(getattr(maml_cfg, 'inner_grad_clip_norm', 1.0))
-                    inner_batch = _build_param_inner_batch(
+            if uses_support:
+                regen = support is None or bool(getattr(cfg.conditioning, 'regenerate_demos_each_episode', False))
+                regen = regen or (adaptation == 'param_maml' and bool(getattr(getattr(cfg, 'adaptation', ConfigDict()), 'regenerate_each_episode', False)))
+                if regen:
+                    support = _build_cached_support(
+                        store=store,
                         sampler=sampler,
-                        support_ids=support['meta']['support_episodes'],
-                        inner_steps=inner_steps,
-                        num_inner_queries=num_inner_queries,
+                        data_cfg=data_cfg,
                         rng=rng,
-                        load_rgb=use_rgb,
-                        load_mask_id=use_mask_id,
+                        use_rgb=use_rgb,
+                        use_mask_id=use_mask_id,
                     )
-                    if inner_steps > 0:
-                        mask = make_name_mask(
-                            params,
-                            include=tuple(getattr(maml_cfg, 'inner_param_include', ())),
-                            exclude=tuple(getattr(maml_cfg, 'inner_param_exclude', ())),
+                    adapted_params = params
+                    adapt_metrics = None
+                    if adaptation == 'param_maml':
+                        maml_cfg = getattr(ckpt_cfg, 'maml', ConfigDict())
+                        eval_adapt = getattr(cfg, 'adaptation', ConfigDict())
+                        inner_steps = int(getattr(eval_adapt, 'inner_steps_override', -1))
+                        if inner_steps < 0:
+                            inner_steps = int(getattr(maml_cfg, 'inner_steps', 1))
+                        num_inner_queries = int(getattr(eval_adapt, 'num_inner_queries', 0))
+                        if num_inner_queries <= 0:
+                            num_inner_queries = int(getattr(maml_cfg, 'num_inner_queries', data_cfg.K))
+                        inner_lr = float(getattr(eval_adapt, 'inner_lr', 0.0))
+                        if inner_lr <= 0.0:
+                            inner_lr = float(getattr(maml_cfg, 'inner_lr', 1e-2))
+                        grad_clip = float(getattr(eval_adapt, 'grad_clip_norm', 0.0))
+                        if grad_clip <= 0.0:
+                            grad_clip = float(getattr(maml_cfg, 'inner_grad_clip_norm', 1.0))
+                        inner_batch = _build_param_inner_batch(
+                            sampler=sampler,
+                            support_ids=support['meta']['support_episodes'],
+                            inner_steps=inner_steps,
+                            num_inner_queries=num_inner_queries,
+                            rng=rng,
+                            load_rgb=use_rgb,
+                            load_mask_id=use_mask_id,
                         )
-                        adapt_fn = _make_param_adapt_fn(
-                            model,
-                            inner_lr=inner_lr,
-                            grad_clip_norm=grad_clip,
-                            loss_type=str(getattr(ckpt_cfg.train, 'loss_type', 'mse')),
-                            inner_mask=mask,
-                        )
-                        adapted_params, metrics = adapt_fn(jax.device_put(params), inner_batch)
-                        adapt_metrics = {k: float(jax.device_get(v)) for k, v in metrics.items()}
-                    logging.info('Adapted params | support=%s | inner_steps=%d | inner_lr=%.6g | metrics=%s', support['meta']['support_episodes'], inner_steps, inner_lr, adapt_metrics)
-                else:
-                    logging.info('Built support conditioning | support=%s', support['meta']['support_episodes'])
-                policy.update_params(adapted_params)
-                policy.update_support(support)
+                        if inner_steps > 0:
+                            mask = make_name_mask(
+                                params,
+                                include=tuple(getattr(maml_cfg, 'inner_param_include', ())),
+                                exclude=tuple(getattr(maml_cfg, 'inner_param_exclude', ())),
+                            )
+                            adapt_fn = _make_param_adapt_fn(
+                                model,
+                                inner_lr=inner_lr,
+                                grad_clip_norm=grad_clip,
+                                loss_type=str(getattr(ckpt_cfg.train, 'loss_type', 'mse')),
+                                inner_mask=mask,
+                            )
+                            adapted_params, metrics = adapt_fn(jax.device_put(params), inner_batch)
+                            adapt_metrics = {k: float(jax.device_get(v)) for k, v in metrics.items()}
+                        logging.info('Adapted params | support=%s | inner_steps=%d | inner_lr=%.6g | metrics=%s', support['meta']['support_episodes'], inner_steps, inner_lr, adapt_metrics)
+                    else:
+                        logging.info('Built support conditioning | support=%s', support['meta']['support_episodes'])
+                    policy.update_params(adapted_params)
+                    policy.update_support(support)
 
             result = _run_episode(
                 episode_index=episode,
