@@ -79,6 +79,7 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.train.prefetch_workers = 2
     cfg.train.prefetch_batches = 2
     cfg.train.resume_path = ''
+    cfg.train.resume_config_from_checkpoint = False
     cfg.train.resume_optimizer = True
     cfg.train.resume_rng = True
     cfg.train.checkpoint_dir = os.path.join(
