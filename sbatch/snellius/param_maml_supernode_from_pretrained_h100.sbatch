@@ -6,15 +6,15 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH --mem=0
-#SBATCH --time=48:00:00
+#SBATCH --time=00:10:00
 
 set -euo pipefail
 
 # Edit this before submitting. The checkpoint must match the model architecture
 # below, especially decoder.context_mode and the encoder token settings.
-PRETRAINED_CHECKPOINT="/path/to/pretrained/checkpoint.pkl"
+PRETRAINED_CHECKPOINT="/projects/prjs1905/robotics/rlbench/icil_jax_rlbench_runs/checkpoints/pretrain/1snk0gkb/step_0400000.pkl"
 
 if [[ "$PRETRAINED_CHECKPOINT" == "/path/to/pretrained/checkpoint.pkl" || ! -f "$PRETRAINED_CHECKPOINT" ]]; then
   echo "Set PRETRAINED_CHECKPOINT in this sbatch file to an existing checkpoint." >&2
@@ -41,10 +41,10 @@ source ./env_jax_rlbench_snellius.sh
 export PYTHONPATH="${SLURM_SUBMIT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "CUDA_VISIBLE_DEVICES before srun: ${CUDA_VISIBLE_DEVICES:-unset}"
-srun --gres=gpu:4 nvidia-smi
-srun --gres=gpu:4 python -c 'import jax; backend = jax.default_backend(); print(f"JAX backend: {backend}; devices: {jax.devices()}"); assert backend == "gpu", f"Expected JAX gpu backend, got {backend}"'
+srun --gres=gpu:2 nvidia-smi
+srun --gres=gpu:2 python -c 'import jax; backend = jax.default_backend(); print(f"JAX backend: {backend}; devices: {jax.devices()}"); assert backend == "gpu", f"Expected JAX gpu backend, got {backend}"'
 
-srun --gres=gpu:4 python -m icil_jax_rlbench.param_maml_direct_regression \
+srun --gres=gpu:2 python -m icil_jax_rlbench.param_maml_direct_regression \
   --config=icil_jax_rlbench/configs/param_maml_supernode.py \
   --config.data.preload_to_memory=True \
   --config.data.keep_open=False \
@@ -76,7 +76,7 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.param_maml_direct_regression \
   --config.model.encoder.use_traj_tokens=True \
   --config.model.decoder.n_layers=4 \
   --config.model.decoder.context_mode=two_ctx \
-  --config.maml.inner_steps=1 \
+  --config.maml.inner_steps=2 \
   --config.maml.num_inner_queries=4 \
   --config.maml.num_query_loss_samples=4 \
   --config.maml.inner_lr=1e-5 \
@@ -84,7 +84,7 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.param_maml_direct_regression \
   --config.maml.inner_grad_clip_norm=1.0 \
   --config.train.seed=0 \
   --config.train.num_steps=200000 \
-  --config.train.batch_size=8 \
+  --config.train.batch_size=32 \
   --config.train.lr=5e-5 \
   --config.train.weight_decay=1e-4 \
   --config.train.grad_clip_norm=1.0 \

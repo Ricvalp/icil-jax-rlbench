@@ -6,9 +6,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH --mem=0
-#SBATCH --time=48:00:00
+#SBATCH --time=24:00:00
 
 set -euo pipefail
 
@@ -32,10 +32,9 @@ source ./env_jax_rlbench_snellius.sh
 export PYTHONPATH="${SLURM_SUBMIT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "CUDA_VISIBLE_DEVICES before srun: ${CUDA_VISIBLE_DEVICES:-unset}"
-srun --gres=gpu:4 nvidia-smi
-srun --gres=gpu:4 python -c 'import jax; backend = jax.default_backend(); print(f"JAX backend: {backend}; devices: {jax.devices()}"); assert backend == "gpu", f"Expected JAX gpu backend, got {backend}"'
-
-srun --gres=gpu:4 python -m icil_jax_rlbench.pretrain_direct_regression \
+srun --gres=gpu:2 nvidia-smi
+srun --gres=gpu:2 python -c 'import jax; backend = jax.default_backend(); print(f"JAX backend: {backend}; devices: {jax.devices()}"); assert backend == "gpu", f"Expected JAX gpu backend, got {backend}"'
+srun --gres=gpu:2 python -m icil_jax_rlbench.pretrain_direct_regression \
   --config=icil_jax_rlbench/configs/pretrain_supernode.py \
   --config.data.preload_to_memory=True \
   --config.data.keep_open=False \
