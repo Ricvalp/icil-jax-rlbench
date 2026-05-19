@@ -96,6 +96,7 @@ _RESUME_DATA_FIELDS = (
     'stride',
     'traj_len',
     'action_representation',
+    'exclude_tasks',
 )
 
 
