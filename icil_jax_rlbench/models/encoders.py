@@ -186,7 +186,7 @@ class ContextEncoder(nn.Module):
             }
         w = weights.astype(jnp.float32)
         if mask is not None:
-            m = mask.astype(jnp.bool_)[:, None, None, None, :]
+            m = mask.astype(jnp.bool_)[None, :, None, None, :]
             w = jnp.where(m, w, 0.0)
             valid_count = jnp.sum(mask.astype(jnp.float32), axis=-1)
         else:
