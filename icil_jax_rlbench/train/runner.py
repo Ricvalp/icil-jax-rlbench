@@ -27,7 +27,7 @@ from icil_jax_rlbench.train.step import (
     create_memory_maml_step,
     create_param_maml_step,
     create_pretrain_step,
-    make_name_mask,
+    make_maml_inner_mask,
 )
 
 
@@ -85,6 +85,9 @@ def _data_config(cfg: ConfigDict) -> ICILDataConfig:
         task_sampling=str(cfg.data.task_sampling),
         task_sampling_alpha=float(cfg.data.task_sampling_alpha),
         traj_len=int(cfg.data.traj_len),
+        query_window_mode=str(getattr(cfg.data, 'query_window_mode', 'online_history')),
+        support_spacetime_points=int(getattr(cfg.data, 'support_spacetime_points', 0)),
+        support_spacetime_sampling=str(getattr(cfg.data, 'support_spacetime_sampling', 'mask_balanced')),
     )
 
 
@@ -96,8 +99,34 @@ _RESUME_DATA_FIELDS = (
     'stride',
     'traj_len',
     'action_representation',
+    'query_window_mode',
+    'support_spacetime_points',
+    'support_spacetime_sampling',
     'exclude_tasks',
 )
+
+
+def _needs_mask_id_for_sampling(policy_cfg: Any, cfg: ConfigDict) -> bool:
+    return (
+        str(getattr(policy_cfg.encoder, 'support_tokenizer', 'frame')) == 'spacetime_supernode'
+        and int(getattr(cfg.data, 'support_spacetime_points', 0)) > 0
+        and str(getattr(cfg.data, 'support_spacetime_sampling', 'mask_balanced')) == 'mask_balanced'
+    )
+
+
+def _needs_mask_id_for_center_sampling(policy_cfg: Any) -> bool:
+    return (
+        str(getattr(policy_cfg.encoder, 'encoder_type', 'perceiver')) == 'supernode'
+        and str(getattr(policy_cfg.encoder, 'supernode_center_sampling', 'linspace')) == 'mask_balanced'
+    )
+
+
+def _load_mask_id_for_batch(policy_cfg: Any, cfg: ConfigDict) -> bool:
+    return (
+        bool(policy_cfg.encoder.use_mask_id)
+        or _needs_mask_id_for_sampling(policy_cfg, cfg)
+        or _needs_mask_id_for_center_sampling(policy_cfg)
+    )
 
 
 def _apply_resume_config_from_checkpoint(cfg: ConfigDict) -> None:
@@ -133,6 +162,8 @@ def _step_config(cfg: ConfigDict) -> StepConfig:
         inner_grad_clip_norm=float(getattr(cfg.maml, 'inner_grad_clip_norm', 1.0)),
         memory_grad_clip_norm=float(getattr(cfg.maml, 'memory_grad_clip_norm', 1.0)),
         memory_update_clip_norm=float(getattr(cfg.maml, 'memory_update_clip_norm', 0.0)),
+        fast_param_preset=str(getattr(cfg.maml, 'fast_param_preset', 'name')),
+        fast_param_top_layers=int(getattr(cfg.maml, 'fast_param_top_layers', 2)),
         inner_param_include=tuple(getattr(cfg.maml, 'inner_param_include', ())),
         inner_param_exclude=tuple(getattr(cfg.maml, 'inner_param_exclude', ())),
         log_attention_stats=bool(getattr(cfg.train, 'log_attention_stats', False)),
@@ -218,6 +249,17 @@ def _replicate_to_local_devices(tree: Any, num_devices: int) -> Any:
     return jax.tree_util.tree_map(_replicate_leaf, tree)
 
 
+def _mask_param_counts(params: Any, mask: Any) -> tuple[int, int]:
+    leaves = jax.tree_util.tree_leaves(params)
+    mask_leaves = jax.tree_util.tree_leaves(mask)
+    total = int(sum(int(x.size) for x in leaves))
+    selected = 0
+    for value, keep in zip(leaves, mask_leaves):
+        if bool(jax.device_get(keep)):
+            selected += int(value.size)
+    return selected, total
+
+
 def _prediction_examples(
     *,
     split: str,
@@ -262,7 +304,7 @@ def _evaluate_prediction_split(
     batch = sampler.build_pretrain_batch(
         num_samples,
         load_rgb=bool(policy_cfg.encoder.use_rgb),
-        load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+        load_mask_id=_load_mask_id_for_batch(policy_cfg, cfg),
     )
     pred = np.asarray(jax.device_get(eval_predict(params, batch)), dtype=np.float32)
     target = np.asarray(batch['target_action'], dtype=np.float32)
@@ -288,7 +330,7 @@ def _build_train_batch(
         return sampler.build_pretrain_batch(
             int(cfg.train.batch_size),
             load_rgb=bool(policy_cfg.encoder.use_rgb),
-            load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+            load_mask_id=_load_mask_id_for_batch(policy_cfg, cfg),
         )
     if mode == 'param_maml':
         return sampler.build_param_maml_batch(
@@ -297,7 +339,7 @@ def _build_train_batch(
             num_inner_queries=int(cfg.maml.num_inner_queries),
             num_query_loss_samples=int(cfg.maml.num_query_loss_samples),
             load_rgb=bool(policy_cfg.encoder.use_rgb),
-            load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+            load_mask_id=_load_mask_id_for_batch(policy_cfg, cfg),
         )
     return sampler.build_memory_maml_batch(
         int(cfg.train.batch_size),
@@ -305,7 +347,7 @@ def _build_train_batch(
         num_inner_queries=int(cfg.maml.num_inner_queries),
         num_query_loss_samples=int(cfg.maml.num_query_loss_samples),
         load_rgb=bool(policy_cfg.encoder.use_rgb),
-        load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+        load_mask_id=_load_mask_id_for_batch(policy_cfg, cfg),
     )
 
 
@@ -376,6 +418,19 @@ def train(mode: str, cfg: ConfigDict) -> None:
     _configure_task_variation_conditioning(cfg, store)
 
     data_cfg = _data_config(cfg)
+    logging.info(
+        'Training query windows: mode=%s T_obs=%d stride=%d H=%d',
+        data_cfg.query_window_mode,
+        data_cfg.T_obs,
+        data_cfg.stride,
+        data_cfg.H,
+    )
+    if int(data_cfg.support_spacetime_points) > 0:
+        logging.info(
+            'Support spacetime sampling: points=%d sampling=%s',
+            data_cfg.support_spacetime_points,
+            data_cfg.support_spacetime_sampling,
+        )
     sampler = ICILSampler(store, data_cfg, seed=int(cfg.train.seed))
     train_eval_sampler = ICILSampler(store, data_cfg, seed=int(cfg.train.seed) + 100003)
     excluded_eval_sampler = None
@@ -407,7 +462,7 @@ def train(mode: str, cfg: ConfigDict) -> None:
     init_batch = sampler.build_pretrain_batch(
         max(1, min(int(cfg.train.batch_size), 2)),
         load_rgb=bool(policy_cfg.encoder.use_rgb),
-        load_mask_id=bool(policy_cfg.encoder.use_mask_id),
+        load_mask_id=_load_mask_id_for_batch(policy_cfg, cfg),
     )
     state = _init_state(model, init_batch, cfg, int(cfg.train.seed))
     n_params = sum(x.size for x in jax.tree_util.tree_leaves(state.params))
@@ -421,7 +476,25 @@ def train(mode: str, cfg: ConfigDict) -> None:
     if mode == 'pretrain':
         p_train_step = create_pretrain_step(model, step_cfg)
     elif mode == 'param_maml':
-        inner_mask = make_name_mask(state.params, include=step_cfg.inner_param_include, exclude=step_cfg.inner_param_exclude)
+        inner_mask = make_maml_inner_mask(
+            state.params,
+            preset=step_cfg.fast_param_preset,
+            include=step_cfg.inner_param_include,
+            exclude=step_cfg.inner_param_exclude,
+            decoder_layers=int(policy_cfg.decoder.n_layers),
+            top_layers=int(step_cfg.fast_param_top_layers),
+        )
+        selected_params, total_params = _mask_param_counts(state.params, inner_mask)
+        logging.info(
+            'Param-MAML fast params: preset=%s selected=%d/%d (%.2f%%) top_layers=%d include=%s exclude=%s',
+            step_cfg.fast_param_preset,
+            selected_params,
+            total_params,
+            100.0 * float(selected_params) / max(1.0, float(total_params)),
+            int(step_cfg.fast_param_top_layers),
+            step_cfg.inner_param_include,
+            step_cfg.inner_param_exclude,
+        )
         inner_mask = _replicate_to_local_devices(inner_mask, num_devices)
         # The mask is static in value but a pytree constant in the closure; use host copy for pmap tracing.
         inner_mask_host = jax.tree_util.tree_map(lambda x: bool(jax.device_get(x[0])) if hasattr(x, 'shape') and x.shape else bool(jax.device_get(x)), inner_mask)

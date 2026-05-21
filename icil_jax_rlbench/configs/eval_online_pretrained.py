@@ -26,7 +26,9 @@ def get_config():
     cfg.dataset.stride = 2
     cfg.dataset.traj_len = 512
     cfg.dataset.action_representation = 'absolute'
-    cfg.dataset.query_stride_mode = 'consecutive' # 'dataset' or 'consecutive'
+    cfg.dataset.query_stride_mode = 'dataset' # 'dataset' or 'consecutive'
+    cfg.dataset.support_spacetime_points = 0
+    cfg.dataset.support_spacetime_sampling = 'mask_balanced'
 
     cfg.conditioning = ConfigDict()
     cfg.conditioning.cache_root = os.environ.get('ICIL_CACHE_ROOT', '')
@@ -58,6 +60,19 @@ def get_config():
     cfg.video.camera = 'front'
     cfg.video.fps = 10
     cfg.video.format = 'mp4'
+
+    cfg.action_chunk_viz = ConfigDict()
+    cfg.action_chunk_viz.enable = False
+    cfg.action_chunk_viz.every_n_plans = 1
+    cfg.action_chunk_viz.max_plots_per_episode = 16
+    cfg.action_chunk_viz.edge_top_k = 8
+    cfg.action_chunk_viz.max_edge_supernodes = 64
+    cfg.action_chunk_viz.skip_self_edges = False
+    cfg.action_chunk_viz.edge_min_length = 0.0
+    cfg.action_chunk_viz.edge_candidate_multiplier = 1
+    cfg.action_chunk_viz.edge_line_width = 3.0
+    cfg.action_chunk_viz.edge_opacity = 1.0
+    cfg.action_chunk_viz.marker_size = 1.5
 
     cfg.output = ConfigDict()
     cfg.output.root_dir = os.environ.get('ICIL_EVAL_OUTPUT_DIR', 'eval_outputs')

@@ -20,6 +20,9 @@ class ICILDataConfig:
     task_sampling: str = 'variation_uniform'
     task_sampling_alpha: float = 1.0
     traj_len: int = 64
+    query_window_mode: str = 'online_history'
+    support_spacetime_points: int = 0
+    support_spacetime_sampling: str = 'mask_balanced'
 
     def __post_init__(self):
         if self.K < 1 or self.L < 1 or self.T_obs < 1 or self.H < 1 or self.stride < 1:
@@ -27,6 +30,12 @@ class ICILDataConfig:
         normalize_action_representation(self.action_representation)
         if self.task_sampling not in ('variation_uniform', 'task_uniform', 'variation_power'):
             raise ValueError('task_sampling must be variation_uniform, task_uniform, or variation_power.')
+        if self.query_window_mode not in ('online_history', 'forward'):
+            raise ValueError("query_window_mode must be 'online_history' or 'forward'.")
+        if self.support_spacetime_points < 0:
+            raise ValueError('support_spacetime_points must be non-negative.')
+        if self.support_spacetime_sampling not in ('mask_balanced', 'uniform'):
+            raise ValueError("support_spacetime_sampling must be 'mask_balanced' or 'uniform'.")
 
 
 class ICILSampler:
@@ -82,6 +91,10 @@ class ICILSampler:
         return np.sort(self.rng.choice(T, size=L, replace=True)).astype(np.int64)
 
     def _sample_t0(self, T: int) -> int:
+        if self.cfg.query_window_mode == 'online_history':
+            if int(T) <= 0:
+                raise RuntimeError(f'Episode too short: T={T}.')
+            return int(self.rng.integers(0, int(T)))
         required = 1 + ((self.cfg.T_obs - 1) * self.cfg.stride)
         max_t0 = int(T) - required
         if max_t0 < 0:
@@ -89,8 +102,14 @@ class ICILSampler:
         return int(self.rng.integers(0, max_t0 + 1))
 
     def _obs_act_indices(self, t0: int, T: int) -> Tuple[np.ndarray, np.ndarray]:
-        obs = int(t0) + np.arange(0, self.cfg.T_obs * self.cfg.stride, self.cfg.stride, dtype=np.int64)
-        act_start = int(obs[-1] + self.cfg.stride)
+        if self.cfg.query_window_mode == 'online_history':
+            current = int(np.clip(int(t0), 0, max(0, int(T) - 1)))
+            offsets = (int(self.cfg.T_obs) - 1 - np.arange(int(self.cfg.T_obs), dtype=np.int64)) * int(self.cfg.stride)
+            obs = np.maximum(0, current - offsets).astype(np.int64)
+            act_start = current + int(self.cfg.stride)
+        else:
+            obs = int(t0) + np.arange(0, self.cfg.T_obs * self.cfg.stride, self.cfg.stride, dtype=np.int64)
+            act_start = int(obs[-1] + self.cfg.stride)
         act = act_start + np.arange(0, self.cfg.H * self.cfg.stride, self.cfg.stride, dtype=np.int64)
         act = np.minimum(act, int(T) - 1)
         return obs, act
@@ -110,17 +129,93 @@ class ICILSampler:
             mask[: len(raw)] = True
         return idx, mask
 
+    def _sample_spacetime_indices(
+        self,
+        valid: np.ndarray,
+        *,
+        mask_id: Optional[np.ndarray],
+        count: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        flat_valid = np.asarray(valid, dtype=np.bool_).reshape(-1)
+        valid_idx = np.flatnonzero(flat_valid)
+        if int(count) <= 0:
+            return np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.bool_)
+        if valid_idx.size == 0:
+            return np.zeros((int(count),), dtype=np.int64), np.zeros((int(count),), dtype=np.bool_)
+        use_mask_balance = (
+            self.cfg.support_spacetime_sampling == 'mask_balanced'
+            and mask_id is not None
+            and np.asarray(mask_id).size == flat_valid.size
+        )
+        if not use_mask_balance:
+            replace = valid_idx.size < int(count)
+            chosen = self.rng.choice(valid_idx, size=int(count), replace=replace).astype(np.int64)
+            return chosen, np.ones((int(count),), dtype=np.bool_)
+
+        masks = np.asarray(mask_id).reshape(-1).astype(np.int64)
+        values = np.unique(masks[valid_idx])
+        groups = [valid_idx[masks[valid_idx] == value] for value in values.tolist()]
+        group_choice = self.rng.integers(0, len(groups), size=int(count))
+        chosen = np.empty((int(count),), dtype=np.int64)
+        for gidx, group in enumerate(groups):
+            slots = np.flatnonzero(group_choice == int(gidx))
+            if slots.size == 0:
+                continue
+            chosen[slots] = self.rng.choice(group, size=int(slots.size), replace=group.size < slots.size)
+        self.rng.shuffle(chosen)
+        return chosen, np.ones((int(count),), dtype=np.bool_)
+
+    def _build_spacetime_support_item(
+        self,
+        item: Dict[str, np.ndarray],
+        *,
+        frame_idx: np.ndarray,
+        episode_length: int,
+    ) -> Dict[str, np.ndarray]:
+        P = int(self.cfg.support_spacetime_points)
+        xyz = np.asarray(item['xyz'], dtype=np.float32)
+        valid = np.asarray(item['valid'], dtype=np.bool_)
+        mask_id = np.asarray(item['mask_id'], dtype=np.int32) if 'mask_id' in item else None
+        chosen, chosen_valid = self._sample_spacetime_indices(valid, mask_id=mask_id, count=P)
+        flat_xyz = xyz.reshape((-1, xyz.shape[-1]))
+        L, N = int(xyz.shape[0]), int(xyz.shape[1])
+        frame_numbers = np.asarray(frame_idx, dtype=np.float32)
+        denom = max(1.0, float(int(episode_length) - 1))
+        flat_time = np.repeat(frame_numbers / denom, N).astype(np.float32)
+        flat_state = np.repeat(np.asarray(item['state'], dtype=np.float32), N, axis=0)
+        out: Dict[str, np.ndarray] = {
+            'xyz': flat_xyz[chosen].astype(np.float32),
+            'time': flat_time[chosen].astype(np.float32),
+            'state': flat_state[chosen].astype(np.float32),
+            'valid': chosen_valid.astype(np.bool_),
+        }
+        if 'rgb' in item:
+            flat_rgb = np.asarray(item['rgb'], dtype=np.float32).reshape((L * N, -1))
+            out['rgb'] = flat_rgb[chosen].astype(np.float32)
+        if mask_id is not None:
+            out['mask_id'] = mask_id.reshape(-1)[chosen].astype(np.int32)
+        return out
+
     def build_support_conditioning(self, *, vidx: int, support_ids: Sequence[int], load_rgb: bool, load_mask_id: bool) -> Dict[str, np.ndarray]:
         cond_xyz: List[np.ndarray] = []
         cond_state: List[np.ndarray] = []
         cond_valid: List[np.ndarray] = []
         cond_rgb: List[np.ndarray] = []
         cond_mask: List[np.ndarray] = []
+        st_xyz: List[np.ndarray] = []
+        st_time: List[np.ndarray] = []
+        st_state: List[np.ndarray] = []
+        st_valid: List[np.ndarray] = []
+        st_rgb: List[np.ndarray] = []
+        st_mask: List[np.ndarray] = []
         cond_traj: List[np.ndarray] = []
         cond_traj_mask: List[np.ndarray] = []
         has_rgb = bool(load_rgb)
         has_mask = bool(load_mask_id)
+        has_st_rgb = bool(load_rgb)
+        has_st_mask = bool(load_mask_id)
         has_traj = self.cfg.traj_len > 0
+        has_spacetime = int(self.cfg.support_spacetime_points) > 0
         for eid in support_ids:
             T = self.store.episode_length(vidx, int(eid))
             kf = self._sample_keyframes(T, self.cfg.L)
@@ -136,6 +231,20 @@ class ICILSampler:
                 cond_mask.append(item['mask_id'])
             else:
                 has_mask = False
+            if has_spacetime:
+                st_item = self._build_spacetime_support_item(item, frame_idx=kf, episode_length=T)
+                st_xyz.append(st_item['xyz'])
+                st_time.append(st_item['time'])
+                st_state.append(st_item['state'])
+                st_valid.append(st_item['valid'])
+                if load_rgb and 'rgb' in st_item:
+                    st_rgb.append(st_item['rgb'])
+                else:
+                    has_st_rgb = False
+                if load_mask_id and 'mask_id' in st_item:
+                    st_mask.append(st_item['mask_id'])
+                else:
+                    has_st_mask = False
             if self.cfg.traj_len > 0:
                 tidx, tmask = self._traj_indices(T)
                 traj = self.store.load_episode_slices(vidx, int(eid), tidx, load_rgb=False, load_mask_id=False)['action']
@@ -150,6 +259,15 @@ class ICILSampler:
             out['cond_rgb'] = np.stack(cond_rgb, axis=0).astype(np.float32)
         if has_mask:
             out['cond_mask_id'] = np.stack(cond_mask, axis=0).astype(np.int32)
+        if has_spacetime:
+            out['cond_st_xyz'] = np.stack(st_xyz, axis=0).astype(np.float32)
+            out['cond_st_time'] = np.stack(st_time, axis=0).astype(np.float32)
+            out['cond_st_state'] = np.stack(st_state, axis=0).astype(np.float32)
+            out['cond_st_valid'] = np.stack(st_valid, axis=0).astype(np.bool_)
+            if has_st_rgb:
+                out['cond_st_rgb'] = np.stack(st_rgb, axis=0).astype(np.float32)
+            if has_st_mask:
+                out['cond_st_mask_id'] = np.stack(st_mask, axis=0).astype(np.int32)
         if has_traj:
             out['cond_traj'] = np.stack(cond_traj, axis=0).astype(np.float32)
             out['cond_traj_mask'] = np.stack(cond_traj_mask, axis=0).astype(np.bool_)

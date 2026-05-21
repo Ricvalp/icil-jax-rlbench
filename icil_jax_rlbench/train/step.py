@@ -46,6 +46,74 @@ def make_name_mask(params: Any, include: Sequence[str] = (), exclude: Sequence[s
     return traverse_util.unflatten_dict(out, sep='/')
 
 
+def _film_block_index(name: str) -> Optional[int]:
+    for piece in name.split('/'):
+        if piece.startswith('film_block_'):
+            try:
+                return int(piece[len('film_block_'):])
+            except ValueError:
+                return None
+    return None
+
+
+def _is_film_param(name: str) -> bool:
+    return any(f'/{piece}/' in f'/{name}/' for piece in ('self_film', 'query_film', 'support_film', 'mlp_film', 'out_film'))
+
+
+def _infer_decoder_layers_from_params(params: Any) -> int:
+    layers = []
+    for path in traverse_util.flatten_dict(params, sep='/'):
+        idx = _film_block_index(str(path))
+        if idx is not None:
+            layers.append(idx)
+    return max(layers) + 1 if layers else 0
+
+
+def make_maml_inner_mask(
+    params: Any,
+    *,
+    preset: str = 'name',
+    include: Sequence[str] = (),
+    exclude: Sequence[str] = (),
+    decoder_layers: int = 0,
+    top_layers: int = 0,
+) -> Any:
+    preset = str(preset or 'name')
+    if preset == 'name':
+        return make_name_mask(params, include=include, exclude=exclude)
+    include = tuple(str(x) for x in include if str(x))
+    exclude = tuple(str(x) for x in exclude if str(x))
+    n_layers = int(decoder_layers)
+    if n_layers <= 0:
+        n_layers = _infer_decoder_layers_from_params(params)
+    top = int(top_layers)
+    if top <= 0:
+        top = n_layers
+    first_top_layer = max(0, n_layers - top)
+
+    flat = traverse_util.flatten_dict(params, sep='/')
+    out = {}
+    for path in flat:
+        name = str(path)
+        if preset == 'all':
+            keep = True
+        elif preset == 'film_all':
+            keep = _is_film_param(name)
+        elif preset == 'film_top':
+            idx = _film_block_index(name)
+            keep = ('/decoder/out_film/' in f'/{name}/') or (
+                idx is not None and idx >= first_top_layer and _is_film_param(name)
+            )
+        else:
+            raise ValueError("maml.fast_param_preset must be 'name', 'all', 'film_all', or 'film_top'.")
+        if include:
+            keep = keep and any(pat in name for pat in include)
+        if exclude and any(pat in name for pat in exclude):
+            keep = False
+        out[path] = jnp.asarray(keep, dtype=jnp.bool_)
+    return traverse_util.unflatten_dict(out, sep='/')
+
+
 def apply_mask(tree: Any, mask: Optional[Any]) -> Any:
     if mask is None:
         return tree
@@ -84,6 +152,8 @@ class StepConfig:
     inner_grad_clip_norm: float = 1.0
     memory_grad_clip_norm: float = 1.0
     memory_update_clip_norm: float = 0.0
+    fast_param_preset: str = 'name'
+    fast_param_top_layers: int = 2
     inner_param_include: Tuple[str, ...] = ()
     inner_param_exclude: Tuple[str, ...] = ()
     log_attention_stats: bool = False

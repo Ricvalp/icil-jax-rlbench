@@ -47,7 +47,10 @@ def _infer_max_positions(enc: EncoderConfig, data_cfg: Any) -> int:
     L = int(get_value(data_cfg, 'L', 1))
     T_obs = int(get_value(data_cfg, 'T_obs', 1))
     traj_len = int(get_value(data_cfg, 'traj_len', 0))
-    support_positions = K * L * per_frame if bool(enc.use_support_tokens) else 0
+    if bool(enc.use_support_tokens) and str(enc.support_tokenizer) == 'spacetime_supernode':
+        support_positions = K * int(enc.spacetime_supernodes)
+    else:
+        support_positions = K * L * per_frame if bool(enc.use_support_tokens) else 0
     query_positions = T_obs * per_frame
     traj_positions = traj_len if bool(enc.use_support_tokens) and bool(enc.use_traj_tokens) else 0
     traj_demo_positions = K if bool(enc.use_support_tokens) and bool(enc.use_traj_tokens) else 0

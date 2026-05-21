@@ -19,7 +19,7 @@ from icil_jax_rlbench.data.sampler import ICILDataConfig, ICILSampler
 from icil_jax_rlbench.models.config import policy_config_from
 from icil_jax_rlbench.models.direct_regression_policy import DirectRegressionPolicy
 from icil_jax_rlbench.train.checkpoints import load_checkpoint
-from icil_jax_rlbench.train.step import action_loss, apply_mask, clip_tree_by_global_norm, make_name_mask
+from icil_jax_rlbench.train.step import action_loss, apply_mask, clip_tree_by_global_norm, make_maml_inner_mask
 
 
 _CAMERAS: Tuple[str, ...] = (
@@ -119,6 +119,9 @@ def _data_config_from_eval_and_checkpoint(cfg: ConfigDict, ckpt: Dict[str, Any])
         task_sampling='variation_uniform',
         task_sampling_alpha=1.0,
         traj_len=int(value('traj_len', 64)),
+        query_window_mode=str(value('query_window_mode', 'online_history')),
+        support_spacetime_points=int(value('support_spacetime_points', 0)),
+        support_spacetime_sampling=str(value('support_spacetime_sampling', 'mask_balanced')),
     )
 
 
@@ -564,6 +567,33 @@ def _build_param_inner_batch(
     return {k: np.stack([step[k] for step in steps], axis=0) for k in steps[0]}
 
 
+def _needs_mask_id_for_support_sampling(policy_cfg: Any, data_cfg: ICILDataConfig) -> bool:
+    return (
+        str(getattr(policy_cfg.encoder, 'support_tokenizer', 'frame')) == 'spacetime_supernode'
+        and int(data_cfg.support_spacetime_points) > 0
+        and str(data_cfg.support_spacetime_sampling) == 'mask_balanced'
+    )
+
+
+def _load_mask_id_for_cached_batches(policy_cfg: Any, data_cfg: ICILDataConfig) -> bool:
+    return (
+        bool(policy_cfg.encoder.use_mask_id)
+        or _needs_mask_id_for_support_sampling(policy_cfg, data_cfg)
+        or _needs_mask_id_for_center_sampling(policy_cfg)
+    )
+
+
+def _needs_mask_id_for_center_sampling(policy_cfg: Any) -> bool:
+    return (
+        str(getattr(policy_cfg.encoder, 'encoder_type', 'perceiver')) == 'supernode'
+        and str(getattr(policy_cfg.encoder, 'supernode_center_sampling', 'linspace')) == 'mask_balanced'
+    )
+
+
+def _load_mask_id_for_live_query(policy_cfg: Any) -> bool:
+    return bool(policy_cfg.encoder.use_mask_id) or _needs_mask_id_for_center_sampling(policy_cfg)
+
+
 def _make_param_adapt_fn(model: DirectRegressionPolicy, *, inner_lr: float, grad_clip_norm: float, loss_type: str, inner_mask: Any):
     def loss_fn(params, batch):
         pred = model.apply({'params': params}, batch, train=False)
@@ -597,16 +627,26 @@ class JaxOnlinePolicy:
         self.params = jax.device_put(params)
         self.data_cfg = data_cfg
         self.conditioning_mode = str(model.cfg.conditioning.mode)
-        self.uses_support = self.conditioning_mode == 'support' and bool(model.cfg.encoder.use_support_tokens)
+        self.uses_support = self.conditioning_mode in ('support', 'support_summary_film') and bool(model.cfg.encoder.use_support_tokens)
+        self.uses_support_summary = self.conditioning_mode == 'support_summary_film' or str(model.cfg.decoder.context_mode) == 'query_film_support'
         self.fixed_conditioning = fixed_conditioning or {}
         self.support_tokens = None
         self.support_mask = None
+        self.support_summary = None
         self._encode_support = jax.jit(
             lambda params, batch: model.apply(
                 {'params': params},
                 batch,
                 train=False,
                 method=DirectRegressionPolicy.encode_support,
+            )
+        )
+        self._encode_support_conditioning = jax.jit(
+            lambda params, batch: model.apply(
+                {'params': params},
+                batch,
+                train=False,
+                method=DirectRegressionPolicy.encode_support_conditioning,
             )
         )
         self._predict_with_memory = jax.jit(
@@ -619,6 +659,17 @@ class JaxOnlinePolicy:
                 method=DirectRegressionPolicy.predict_with_memory,
             )
         )
+        self._predict_with_conditioning = jax.jit(
+            lambda params, batch, memory, mask, summary: model.apply(
+                {'params': params},
+                batch,
+                memory,
+                support_mask=mask,
+                support_summary=summary,
+                train=False,
+                method=DirectRegressionPolicy.predict_with_memory,
+            )
+        )
         self._predict_query_only = jax.jit(
             lambda params, batch: model.apply({'params': params}, batch, train=False)
         )
@@ -627,14 +678,20 @@ class JaxOnlinePolicy:
         self.params = jax.device_put(params)
         self.support_tokens = None
         self.support_mask = None
+        self.support_summary = None
 
     def update_support(self, support: Dict[str, np.ndarray]) -> None:
         if not self.uses_support:
             self.support_tokens = None
             self.support_mask = None
+            self.support_summary = None
             return
         batch = {k: v for k, v in support.items() if k != 'meta'}
-        self.support_tokens, self.support_mask = self._encode_support(self.params, batch)
+        if self.uses_support_summary:
+            self.support_tokens, self.support_mask, self.support_summary = self._encode_support_conditioning(self.params, batch)
+        else:
+            self.support_tokens, self.support_mask = self._encode_support(self.params, batch)
+            self.support_summary = None
         jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else x, self.support_tokens)
 
     def predict_action_chunk(self, query: Dict[str, np.ndarray]) -> np.ndarray:
@@ -646,7 +703,12 @@ class JaxOnlinePolicy:
             return decode_action_chunk(pred, query_state=query['query_state'], representation=self.data_cfg.action_representation)
         if self.support_tokens is None or self.support_mask is None:
             raise RuntimeError('Support conditioning has not been encoded.')
-        pred = self._predict_with_memory(self.params, query, self.support_tokens, self.support_mask)
+        if self.uses_support_summary:
+            if self.support_summary is None:
+                raise RuntimeError('Support summary has not been encoded.')
+            pred = self._predict_with_conditioning(self.params, query, self.support_tokens, self.support_mask, self.support_summary)
+        else:
+            pred = self._predict_with_memory(self.params, query, self.support_tokens, self.support_mask)
         pred = np.asarray(jax.device_get(pred), dtype=np.float32)
         return decode_action_chunk(pred, query_state=query['query_state'], representation=self.data_cfg.action_representation)
 
@@ -664,6 +726,67 @@ def _maybe_init_wandb(cfg: ConfigDict, run_dir: Path):
         dir=str(run_dir),
         config=cfg.to_dict(),
     )
+
+
+def _action_chunk_viz_enabled(cfg: ConfigDict) -> bool:
+    return hasattr(cfg, 'action_chunk_viz') and _as_bool(getattr(cfg.action_chunk_viz, 'enable', False))
+
+
+def _write_online_action_chunk_viz(
+    *,
+    cfg: ConfigDict,
+    policy: JaxOnlinePolicy,
+    processor: LiveObservationProcessor,
+    frame: Dict[str, np.ndarray],
+    plan: np.ndarray,
+    current_state: np.ndarray,
+    episode_index: int,
+    plan_index: int,
+    env_steps: int,
+    executed_actions: int,
+    run_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    if not _action_chunk_viz_enabled(cfg):
+        return None
+    every = max(1, int(getattr(cfg.action_chunk_viz, 'every_n_plans', 1)))
+    max_plots = int(getattr(cfg.action_chunk_viz, 'max_plots_per_episode', 0))
+    if int(plan_index) % every != 0:
+        return None
+    if max_plots >= 0 and int(plan_index // every) >= max_plots:
+        return None
+    enc = policy.model.cfg.encoder
+    num_supernodes = int(getattr(enc, 'supernodes', 0)) if str(getattr(enc, 'encoder_type', '')) == 'supernode' else 0
+    temperature = float(getattr(enc, 'supernode_temperature', 0.005))
+    out_path = run_dir / 'action_chunks' / f'episode_{episode_index:04d}_plan_{plan_index:04d}_step_{env_steps:04d}.html'
+    title = (
+        f'episode {episode_index} plan {plan_index} env_step {env_steps} | '
+        f'execute {int(executed_actions)}/{int(np.asarray(plan).shape[0])}'
+    )
+    try:
+        from icil_jax_rlbench.eval.action_chunk_plots import write_online_action_chunk_html
+
+        return write_online_action_chunk_html(
+            frame=frame,
+            plan=plan,
+            current_state=current_state,
+            out_path=out_path,
+            title=title,
+            handle_to_name=processor.handle_to_name,
+            num_supernodes=num_supernodes,
+            supernode_temperature=temperature,
+            edge_top_k=int(getattr(cfg.action_chunk_viz, 'edge_top_k', 8)),
+            max_edge_supernodes=int(getattr(cfg.action_chunk_viz, 'max_edge_supernodes', 64)),
+            skip_self_edges=bool(getattr(cfg.action_chunk_viz, 'skip_self_edges', False)),
+            edge_min_length=float(getattr(cfg.action_chunk_viz, 'edge_min_length', 0.0)),
+            edge_candidate_multiplier=int(getattr(cfg.action_chunk_viz, 'edge_candidate_multiplier', 1)),
+            edge_line_width=float(getattr(cfg.action_chunk_viz, 'edge_line_width', 3.0)),
+            edge_opacity=float(getattr(cfg.action_chunk_viz, 'edge_opacity', 1.0)),
+            marker_size=float(getattr(cfg.action_chunk_viz, 'marker_size', 1.5)),
+            executed_actions=int(executed_actions),
+        )
+    except Exception as exc:
+        logging.warning('Skipping online action chunk visualization for episode=%d plan=%d: %s', episode_index, plan_index, exc)
+        return None
 
 
 def _run_episode(
@@ -697,6 +820,8 @@ def _run_episode(
     terminated = False
     error: Optional[str] = None
     env_steps = 0
+    plan_index = 0
+    action_chunk_visualizations: List[Dict[str, Any]] = []
     max_env_steps = int(cfg.task.max_env_steps)
     execute_actions = max(1, int(cfg.control.execute_actions_per_plan))
 
@@ -714,6 +839,7 @@ def _run_episode(
             predict_start = time.time()
             plan_np = policy.predict_action_chunk(query)[0]
             predict_s = time.time() - predict_start
+            n_exec = int(min(execute_actions, plan_np.shape[0], max_env_steps - env_steps))
             if env_steps == 0:
                 first_delta = float(np.linalg.norm(plan_np[0, :3] - current_state[:3]))
                 logging.info(
@@ -724,7 +850,22 @@ def _run_episode(
                     np.array2string(plan_np[0, :3], precision=4),
                     first_delta,
                 )
-            n_exec = int(min(execute_actions, plan_np.shape[0], max_env_steps - env_steps))
+            viz = _write_online_action_chunk_viz(
+                cfg=cfg,
+                policy=policy,
+                processor=processor,
+                frame=history[-1],
+                plan=plan_np,
+                current_state=current_state,
+                episode_index=episode_index,
+                plan_index=plan_index,
+                env_steps=env_steps,
+                executed_actions=n_exec,
+                run_dir=run_dir,
+            )
+            if viz is not None:
+                action_chunk_visualizations.append(viz)
+            plan_index += 1
             for i in range(n_exec):
                 action = _sanitize_action(
                     plan_np[i],
@@ -779,6 +920,7 @@ def _run_episode(
         'env_steps': int(env_steps),
         'error': error,
         'video_path': video_path,
+        'action_chunk_visualizations': action_chunk_visualizations,
     }
 
 
@@ -802,6 +944,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
     variation = int(cfg.task.variation)
     cache_root = _support_cache_root(cfg, ckpt)
     key = _choose_variation_key(cache_root, task_name, variation, rng)
+    eval_variation = int(key.variation)
     store = RLBenchCacheStore([key], keep_open=bool(getattr(cfg.conditioning, 'keep_open', True)), preload_to_memory=False)
     sampler = ICILSampler(store, data_cfg, seed=seed + 23)
     num_points, state_dim, action_dim = store.infer_dims()
@@ -809,8 +952,8 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         cfg.conditioning.num_points = int(num_points)
 
     policy_cfg = policy_config_from(ckpt_cfg.model, H=data_cfg.H, data_cfg=data_cfg)
-    fixed_conditioning = _task_variation_ids_from_checkpoint(ckpt_cfg, task_name, int(key.variation))
-    uses_support = str(policy_cfg.conditioning.mode) == 'support' and bool(policy_cfg.encoder.use_support_tokens)
+    fixed_conditioning = _task_variation_ids_from_checkpoint(ckpt_cfg, task_name, eval_variation)
+    uses_support = str(policy_cfg.conditioning.mode) in ('support', 'support_summary_film') and bool(policy_cfg.encoder.use_support_tokens)
     if adaptation == 'param_maml' and not uses_support:
         raise ValueError('Param-MAML online eval requires a checkpoint with model.encoder.use_support_tokens=True.')
     model = DirectRegressionPolicy(policy_cfg, state_dim=state_dim, action_dim=action_dim)
@@ -823,13 +966,26 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         logging.warning('Checkpoint model uses RGB; forcing conditioning.use_rgb=True for shape compatibility.')
     if use_mask_id and not bool(getattr(cfg.conditioning, 'use_mask_id', False)):
         logging.warning('Checkpoint model uses mask ids; forcing conditioning.use_mask_id=True for shape compatibility.')
+    load_cached_mask_id = _load_mask_id_for_cached_batches(policy_cfg, data_cfg)
+    load_live_mask_id = _load_mask_id_for_live_query(policy_cfg)
+    if load_cached_mask_id and not use_mask_id:
+        logging.info(
+            'Loading cached support mask IDs for geometry-only sampling: support_sampling=%s center_sampling=%s.',
+            data_cfg.support_spacetime_sampling,
+            str(getattr(policy_cfg.encoder, 'supernode_center_sampling', 'linspace')),
+        )
+    if load_live_mask_id and not use_mask_id:
+        logging.info(
+            'Loading live query mask IDs for geometry-only %s supernode center sampling.',
+            str(getattr(policy_cfg.encoder, 'supernode_center_sampling', 'linspace')),
+        )
 
     output_root = Path(str(cfg.output.root_dir)).expanduser().resolve()
-    run_dir = output_root / f'{task_name}_var{variation}_{time.strftime("%Y%m%d-%H%M%S")}'
+    run_dir = output_root / f'{task_name}_var{eval_variation}_{time.strftime("%Y%m%d-%H%M%S")}'
     run_dir.mkdir(parents=True, exist_ok=True)
     wandb_run = _maybe_init_wandb(cfg, run_dir)
     if wandb_run is not None:
-        run_dir = output_root / f'{task_name}_var{variation}_{wandb_run.id}'
+        run_dir = output_root / f'{task_name}_var{eval_variation}_{wandb_run.id}'
         run_dir.mkdir(parents=True, exist_ok=True)
         wandb_run.name = str(getattr(cfg.wandb, 'name', '') or run_dir.name)
 
@@ -839,6 +995,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         'checkpoint_step': int(ckpt.get('step', -1)),
         'run_dir': str(run_dir),
         'adaptation': adaptation,
+        'requested_variation': int(variation),
         'data': {
             'K': int(data_cfg.K),
             'L': int(data_cfg.L),
@@ -846,21 +1003,36 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             'H': int(data_cfg.H),
             'stride': int(data_cfg.stride),
             'traj_len': int(data_cfg.traj_len),
+            'support_spacetime_points': int(data_cfg.support_spacetime_points),
+            'support_spacetime_sampling': str(data_cfg.support_spacetime_sampling),
             'action_representation': str(data_cfg.action_representation),
+            'query_window_mode': str(data_cfg.query_window_mode),
         },
         'model_encoder': str(policy_cfg.encoder.encoder_type),
+        'model_supernode_center_sampling': str(getattr(policy_cfg.encoder, 'supernode_center_sampling', 'linspace')),
         'model_conditioning_mode': str(policy_cfg.conditioning.mode),
         'model_uses_support_tokens': bool(uses_support),
         'model_encoder_max_positions': int(policy_cfg.encoder.max_positions),
         'cache_variation': int(key.variation),
+        'eval_variation': int(eval_variation),
         'workspace_bounds': workspace_bounds,
     }
     config_path = run_dir / 'resolved_eval_config.json'
     with config_path.open('w', encoding='utf-8') as file:
         json.dump(resolved_cfg, file, indent=2)
 
-    logging.info('Online eval | task=%s variation=%d checkpoint=%s', task_name, variation, checkpoint_path)
-    logging.info('Resolved data cfg: K=%d L=%d T_obs=%d H=%d stride=%d traj_len=%d action=%s', data_cfg.K, data_cfg.L, data_cfg.T_obs, data_cfg.H, data_cfg.stride, data_cfg.traj_len, data_cfg.action_representation)
+    logging.info('Online eval | task=%s variation=%d checkpoint=%s', task_name, eval_variation, checkpoint_path)
+    logging.info(
+        'Resolved data cfg: K=%d L=%d T_obs=%d H=%d stride=%d traj_len=%d action=%s query_window_mode=%s',
+        data_cfg.K,
+        data_cfg.L,
+        data_cfg.T_obs,
+        data_cfg.H,
+        data_cfg.stride,
+        data_cfg.traj_len,
+        data_cfg.action_representation,
+        data_cfg.query_window_mode,
+    )
     logging.info(
         'Model: encoder=%s conditioning=%s uses_support=%s max_positions=%d params_step=%s action_dim=%d state_dim=%d points=%d',
         policy_cfg.encoder.encoder_type,
@@ -893,7 +1065,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             task_env=task_env,
             num_points=int(cfg.conditioning.num_points),
             use_rgb=use_rgb,
-            use_mask_id=use_mask_id,
+            use_mask_id=load_live_mask_id,
             workspace_bounds=workspace_bounds,
             seed=seed + 11,
         )
@@ -908,7 +1080,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
                         data_cfg=data_cfg,
                         rng=rng,
                         use_rgb=use_rgb,
-                        use_mask_id=use_mask_id,
+                        use_mask_id=load_cached_mask_id,
                     )
                     adapted_params = params
                     adapt_metrics = None
@@ -934,13 +1106,16 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
                             num_inner_queries=num_inner_queries,
                             rng=rng,
                             load_rgb=use_rgb,
-                            load_mask_id=use_mask_id,
+                            load_mask_id=load_cached_mask_id,
                         )
                         if inner_steps > 0:
-                            mask = make_name_mask(
+                            mask = make_maml_inner_mask(
                                 params,
+                                preset=str(getattr(maml_cfg, 'fast_param_preset', 'name')),
                                 include=tuple(getattr(maml_cfg, 'inner_param_include', ())),
                                 exclude=tuple(getattr(maml_cfg, 'inner_param_exclude', ())),
+                                decoder_layers=int(policy_cfg.decoder.n_layers),
+                                top_layers=int(getattr(maml_cfg, 'fast_param_top_layers', 2)),
                             )
                             adapt_fn = _make_param_adapt_fn(
                                 model,
@@ -960,7 +1135,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             result = _run_episode(
                 episode_index=episode,
                 task_env=task_env,
-                variation=variation,
+                variation=eval_variation,
                 policy=policy,
                 processor=processor,
                 data_cfg=data_cfg,
@@ -985,7 +1160,8 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
         success_rate = float(successes) / float(max(1, len(results)))
         summary = {
             'task': task_name,
-            'variation': variation,
+            'variation': eval_variation,
+            'requested_variation': int(variation),
             'checkpoint_path': str(checkpoint_path),
             'checkpoint_step': int(ckpt.get('step', -1)),
             'adaptation': adaptation,

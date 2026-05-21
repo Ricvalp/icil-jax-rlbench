@@ -1,0 +1,5 @@
+I had an idea for a technique to feed very long episodes to a transformer without increasing the context length too much. My idea is based on the fact that most objects in the scen don't move during training and therefore, the corresponding tokens in the context are mostly redundant.
+
+My idea is to subsample in space and time from the union of all the frames in the episodes (or a subset of them). Take one episode of 100 frames, subsample 30 frames (uniformly or randomly we will decide), take the union of all the points in those 30 frames, and then subsample in space from that union of points, to get a fixed number of tokens (e.g., 8k points). On these 8K points we apply the supernode tokenizer with the same "triks" that we are using now to make sure that each object receives its supernode quota. Obviously, each point will have a timestamp associated with it, so we can also encode the time information in the tokens. This way, we can feed a long episode to the transformer without increasing the context length too much, while still capturing the important information from the episode. 
+
+This can be done for the T_obs query frames as well.

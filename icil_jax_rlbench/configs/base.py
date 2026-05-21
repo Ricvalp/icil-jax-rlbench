@@ -32,6 +32,9 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.data.task_sampling = 'task_uniform'
     cfg.data.task_sampling_alpha = 1.0
     cfg.data.traj_len = 64
+    cfg.data.query_window_mode = 'online_history'
+    cfg.data.support_spacetime_points = 0
+    cfg.data.support_spacetime_sampling = 'mask_balanced'
     cfg.data.keep_open = True
     cfg.data.preload_to_memory = False
 
@@ -48,9 +51,15 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.model.encoder.support_num_latents = 64
     cfg.model.encoder.support_layers = 2
     cfg.model.encoder.query_layers = 1
+    cfg.model.encoder.support_tokenizer = 'frame'  # frame | spacetime_supernode
     cfg.model.encoder.supernodes = 64
-    cfg.model.encoder.supernode_temperature = 0.02
+    cfg.model.encoder.supernode_temperature = 0.005
+    cfg.model.encoder.supernode_center_sampling = 'mask_balanced'  # linspace | mask_balanced
     cfg.model.encoder.supernode_layers = 2
+    cfg.model.encoder.spacetime_supernodes = 256
+    cfg.model.encoder.spacetime_temperature_xyz = 0.005
+    cfg.model.encoder.spacetime_temperature_t = 0.04
+    cfg.model.encoder.spacetime_layers = 2
     cfg.model.encoder.traj_layers = 1
     cfg.model.encoder.max_positions = 0
     cfg.model.encoder.mask_id_vocab = 256
@@ -60,17 +69,20 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.model.encoder.use_traj_tokens = True
 
     cfg.model.conditioning = ConfigDict()
-    cfg.model.conditioning.mode = 'support'  # support | none | task_variation
+    cfg.model.conditioning.mode = 'support'  # support | none | task_variation | support_summary_film
     cfg.model.conditioning.num_task_tokens = 1
     cfg.model.conditioning.num_variation_tokens = 1
     cfg.model.conditioning.num_tasks = 1
     cfg.model.conditioning.num_task_variations = 1
+    cfg.model.conditioning.support_summary_source = 'traj_and_memory'
 
     cfg.model.decoder = ConfigDict()
     cfg.model.decoder.n_layers = 4
-    cfg.model.decoder.context_mode = 'single_ctx'  # single_ctx | two_ctx
+    cfg.model.decoder.context_mode = 'single_ctx'  # single_ctx | two_ctx | query_film_support
     cfg.model.decoder.mlp_mult = 4
     cfg.model.decoder.dropout = 0.0
+    cfg.model.decoder.support_cross_layers = 2
+    cfg.model.decoder.film_mlp_mult = 4
 
     cfg.train = ConfigDict()
     cfg.train.seed = 0
@@ -103,6 +115,8 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.maml.inner_grad_clip_norm = 1.0
     cfg.maml.memory_grad_clip_norm = 1.0
     cfg.maml.memory_update_clip_norm = 0.0
+    cfg.maml.fast_param_preset = 'name'  # name | all | film_all | film_top
+    cfg.maml.fast_param_top_layers = 2
     cfg.maml.inner_param_include = ()
     cfg.maml.inner_param_exclude = ()
 
