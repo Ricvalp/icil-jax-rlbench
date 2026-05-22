@@ -22,6 +22,7 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
         'meat_on_grill',
         'put_umbrella_in_umbrella_stand',
         'lamp_on',
+        'eval_contextual_slide_pick_sequence',
     )
     cfg.data.K = 4
     cfg.data.L = 10
