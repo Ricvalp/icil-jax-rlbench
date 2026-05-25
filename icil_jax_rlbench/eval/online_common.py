@@ -470,6 +470,7 @@ def build_rlbench_env(cfg: ConfigDict, task_name: str):
         action_mode=action_mode,
         obs_config=obs_config,
         headless=_as_bool(cfg.sim.headless),
+        static_positions=_as_bool(getattr(cfg.sim, 'static_positions', False)),
         arm_max_velocity=float(cfg.sim.arm_max_velocity),
         arm_max_acceleration=float(cfg.sim.arm_max_acceleration),
     )
@@ -789,6 +790,54 @@ def _write_online_action_chunk_viz(
         return None
 
 
+def _write_ground_truth_demo_videos(
+    *,
+    task_env: Any,
+    variation: int,
+    cfg: ConfigDict,
+    run_dir: Path,
+) -> List[Dict[str, Any]]:
+    gt_cfg = getattr(cfg, 'ground_truth_video', ConfigDict())
+    if not _as_bool(getattr(gt_cfg, 'enable', False)):
+        return []
+    if int(variation) >= 0:
+        task_env.set_variation(int(variation))
+    num_demos = max(0, int(getattr(gt_cfg, 'num_demos', 1)))
+    if num_demos <= 0:
+        return []
+    camera = str(getattr(gt_cfg, 'camera', '') or getattr(cfg.video, 'camera', 'front'))
+    fps = int(getattr(gt_cfg, 'fps', getattr(cfg.video, 'fps', 10)))
+    fmt = str(getattr(gt_cfg, 'format', getattr(cfg.video, 'format', 'mp4'))).lower()
+    max_attempts = int(getattr(gt_cfg, 'max_attempts', 10))
+    outputs: List[Dict[str, Any]] = []
+    demos = task_env.get_demos(
+        amount=num_demos,
+        live_demos=True,
+        max_attempts=max_attempts,
+    )
+    for demo_index, demo in enumerate(demos):
+        frames = [_extract_rgb_frame(obs, camera) for obs in demo]
+        if not frames:
+            logging.warning('Ground-truth demo %d has no frames; skipping video.', demo_index)
+            continue
+        video_file = run_dir / 'ground_truth' / f'demo_{demo_index:04d}.{fmt}'
+        video_path = _write_video(frames, video_file, fps=fps)
+        item = {
+            'demo_index': int(demo_index),
+            'path': str(video_path),
+            'frames': int(len(frames)),
+            'camera': camera,
+        }
+        outputs.append(item)
+        logging.info(
+            'Wrote ground-truth demo video %d | frames=%d | path=%s',
+            demo_index,
+            len(frames),
+            video_path,
+        )
+    return outputs
+
+
 def _run_episode(
     *,
     episode_index: int,
@@ -1069,6 +1118,12 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             workspace_bounds=workspace_bounds,
             seed=seed + 11,
         )
+        ground_truth_videos = _write_ground_truth_demo_videos(
+            task_env=task_env,
+            variation=eval_variation,
+            cfg=cfg,
+            run_dir=run_dir,
+        )
         for episode in range(int(cfg.task.num_eval_episodes)):
             if uses_support:
                 regen = support is None or bool(getattr(cfg.conditioning, 'regenerate_demos_each_episode', False))
@@ -1168,6 +1223,7 @@ def evaluate(cfg: ConfigDict, *, adaptation: str) -> None:
             'num_episodes': len(results),
             'num_success': int(successes),
             'success_rate': success_rate,
+            'ground_truth_videos': ground_truth_videos,
             'results': results,
         }
         summary_path = run_dir / 'summary.json'

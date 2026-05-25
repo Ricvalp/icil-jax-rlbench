@@ -46,6 +46,7 @@ def get_config():
     cfg.sim.arm_max_velocity = 1.0
     cfg.sim.arm_max_acceleration = 4.0
     cfg.sim.collision_checking = False
+    cfg.sim.static_positions = False
 
     cfg.control = ConfigDict()
     cfg.control.execute_actions_per_plan = 8
@@ -60,6 +61,14 @@ def get_config():
     cfg.video.camera = 'front'
     cfg.video.fps = 10
     cfg.video.format = 'mp4'
+
+    cfg.ground_truth_video = ConfigDict()
+    cfg.ground_truth_video.enable = True
+    cfg.ground_truth_video.num_demos = 1
+    cfg.ground_truth_video.camera = ''
+    cfg.ground_truth_video.fps = 10
+    cfg.ground_truth_video.format = 'mp4'
+    cfg.ground_truth_video.max_attempts = 10
 
     cfg.action_chunk_viz = ConfigDict()
     cfg.action_chunk_viz.enable = False
