@@ -91,19 +91,34 @@ def _data_config(cfg: ConfigDict) -> ICILDataConfig:
     )
 
 
-_RESUME_DATA_FIELDS = (
-    'K',
-    'L',
-    'T_obs',
-    'H',
-    'stride',
-    'traj_len',
-    'action_representation',
-    'query_window_mode',
-    'support_spacetime_points',
-    'support_spacetime_sampling',
-    'exclude_tasks',
-)
+_RESUME_DATA_RUNTIME_FIELDS = frozenset((
+    # Cache locations are machine-specific. Keep the current config/env value.
+    'cache_root',
+))
+
+_RESUME_TRAIN_RUNTIME_FIELDS = frozenset((
+    # These control how this continuation run is launched and where it writes.
+    'num_steps',
+    'checkpoint_dir',
+    'resume_path',
+    'resume_config_from_checkpoint',
+    'resume_optimizer',
+    'resume_rng',
+))
+
+_TRAINING_MODES = frozenset(('pretrain', 'param_maml', 'memory_maml'))
+
+
+def _copy_config_section(dst: ConfigDict, src: Any, *, skip: frozenset[str] = frozenset()) -> list[str]:
+    copied: list[str] = []
+    if src is None:
+        return copied
+    for field in src:
+        if str(field) in skip:
+            continue
+        setattr(dst, field, getattr(src, field))
+        copied.append(str(field))
+    return copied
 
 
 def _needs_mask_id_for_sampling(policy_cfg: Any, cfg: ConfigDict) -> bool:
@@ -129,7 +144,7 @@ def _load_mask_id_for_batch(policy_cfg: Any, cfg: ConfigDict) -> bool:
     )
 
 
-def _apply_resume_config_from_checkpoint(cfg: ConfigDict) -> None:
+def _apply_resume_config_from_checkpoint(cfg: ConfigDict, mode: str) -> None:
     if not bool(getattr(cfg.train, 'resume_config_from_checkpoint', False)):
         return
     resume = str(getattr(cfg.train, 'resume_path', '') or '')
@@ -139,18 +154,41 @@ def _apply_resume_config_from_checkpoint(cfg: ConfigDict) -> None:
     ckpt_cfg = ConfigDict(ckpt.get('config', {}) or {})
     if not hasattr(ckpt_cfg, 'model'):
         raise ValueError(f'Checkpoint {resume} does not contain config.model.')
+    target_mode = str(mode)
+    checkpoint_mode = str(getattr(ckpt_cfg, 'mode', ''))
+    same_training_mode = checkpoint_mode == target_mode and target_mode in _TRAINING_MODES
+
     cfg.model = ConfigDict(ckpt_cfg.model)
-    copied = []
+    copied_data = []
+    copied_train = []
+    copied_maml = []
     if hasattr(ckpt_cfg, 'data'):
-        for field in _RESUME_DATA_FIELDS:
-            if hasattr(ckpt_cfg.data, field):
-                setattr(cfg.data, field, getattr(ckpt_cfg.data, field))
-                copied.append(field)
+        copied_data = _copy_config_section(
+            cfg.data,
+            ckpt_cfg.data,
+            skip=_RESUME_DATA_RUNTIME_FIELDS,
+        )
+    if same_training_mode and hasattr(ckpt_cfg, 'train'):
+        copied_train = _copy_config_section(
+            cfg.train,
+            ckpt_cfg.train,
+            skip=_RESUME_TRAIN_RUNTIME_FIELDS,
+        )
+    if same_training_mode and target_mode in ('param_maml', 'memory_maml') and hasattr(ckpt_cfg, 'maml'):
+        copied_maml = _copy_config_section(cfg.maml, ckpt_cfg.maml)
     logging.info(
-        'Loaded model config%s from checkpoint: %s',
-        f' and data fields {copied}' if copied else '',
+        'Loaded model config from checkpoint: %s | data fields=%s | train fields=%s | maml fields=%s',
         resume,
+        copied_data,
+        copied_train,
+        copied_maml,
     )
+    if checkpoint_mode and checkpoint_mode != target_mode:
+        logging.info(
+            'Checkpoint mode %r differs from requested mode %r; kept current train/maml config for mode transfer.',
+            checkpoint_mode,
+            target_mode,
+        )
 
 
 def _step_config(cfg: ConfigDict) -> StepConfig:
@@ -407,7 +445,7 @@ def _maybe_log_prediction_eval(
 def train(mode: str, cfg: ConfigDict) -> None:
     if mode not in ('pretrain', 'param_maml', 'memory_maml'):
         raise ValueError(f'Unknown mode={mode!r}')
-    _apply_resume_config_from_checkpoint(cfg)
+    _apply_resume_config_from_checkpoint(cfg, mode)
     excluded_tasks = _tasks(getattr(cfg.data, 'exclude_tasks', ())) or ()
     keys, selected_tasks = build_keys(Path(cfg.data.cache_root), tasks=_tasks(getattr(cfg.data, 'tasks', ())), exclude_tasks=excluded_tasks)
     store = RLBenchCacheStore(keys, keep_open=bool(cfg.data.keep_open), preload_to_memory=bool(cfg.data.preload_to_memory))

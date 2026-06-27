@@ -9,7 +9,7 @@ def get_config():
     cfg = _base()
     cfg.task.max_env_steps = 220
     cfg.dataset.query_stride_mode = 'dataset'
-    cfg.control.execute_actions_per_plan = 1
+    cfg.control.execute_actions_per_plan = 8
 
     cfg.adaptation = ConfigDict()
     cfg.adaptation.inner_steps_override = -1
