@@ -16,7 +16,7 @@ set -euo pipefail
 # Same-mode resume_config_from_checkpoint=True restores saved model/data/train/MAML
 # hyperparameters. Runtime controls below intentionally choose the checkpoint,
 # continuation length, output run, optimizer resume, and RNG resume.
-RESUME_CHECKPOINT="/projects/prjs1905/robotics/rlbench/icil_jax_rlbench_runs/checkpoints/param_maml/2a239p79/step_0040000.pkl"
+RESUME_CHECKPOINT="/projects/prjs1905/robotics/rlbench/icil_jax_rlbench_runs/checkpoints/param_maml/2a239p79/step_0045000.pkl"
 
 if [[ ! -f "${RESUME_CHECKPOINT}" ]]; then
   echo "Missing RESUME_CHECKPOINT=${RESUME_CHECKPOINT}" >&2
