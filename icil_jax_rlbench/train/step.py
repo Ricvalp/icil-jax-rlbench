@@ -138,6 +138,10 @@ def action_loss(pred: jnp.ndarray, target: jnp.ndarray, loss_type: str = 'mse') 
     raise ValueError(f'Unknown loss_type={loss_type!r}')
 
 
+def improvement_ratio(before: jnp.ndarray, after: jnp.ndarray) -> jnp.ndarray:
+    return (before - after) / jnp.maximum(jnp.abs(before), jnp.asarray(1e-8, dtype=jnp.float32))
+
+
 def _split_rng(rng: jax.Array, n: int) -> Tuple[jax.Array, jax.Array]:
     rng, out = jax.random.split(rng)
     return rng, out
@@ -256,6 +260,7 @@ def create_param_maml_step(
                 'inner_grad_norm': inner_grad_norm,
                 'pred_l1': out_metrics['pred_l1'],
                 'improvement': before - after,
+                'improvement_ratio': improvement_ratio(before, after),
                 **{k: v for k, v in out_metrics.items() if k.startswith('attn_')},
             }
 
@@ -375,6 +380,7 @@ def create_memory_maml_step(model: DirectRegressionPolicy, cfg: StepConfig) -> C
                 'inner_grad_norm': inner_grad_norm,
                 'pred_l1': l1_loss(pred_after, task_query['target_action']),
                 'improvement': before - after,
+                'improvement_ratio': improvement_ratio(before, after),
                 'memory_delta_norm': mem_delta,
                 'memory_relative_delta_norm': rel_mem_delta,
                 **support_attn_stats,

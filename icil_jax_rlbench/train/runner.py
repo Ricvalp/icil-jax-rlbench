@@ -104,6 +104,7 @@ _RESUME_TRAIN_RUNTIME_FIELDS = frozenset((
     'resume_config_from_checkpoint',
     'resume_optimizer',
     'resume_rng',
+    'resume_step_offset',
 ))
 
 _TRAINING_MODES = frozenset(('pretrain', 'param_maml', 'memory_maml'))
@@ -220,6 +221,24 @@ def _resume_checkpoint_max_positions(cfg: ConfigDict) -> int:
     try:
         return int(ckpt_cfg.model.encoder.max_positions)
     except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def _resume_step_offset(cfg: ConfigDict, mode: str) -> int:
+    resume = str(getattr(cfg.train, 'resume_path', '') or '')
+    if not resume:
+        return 0
+    try:
+        ckpt = load_checkpoint(resume)
+    except FileNotFoundError:
+        return 0
+    ckpt_cfg = ConfigDict(ckpt.get('config', {}) or {})
+    checkpoint_mode = str(getattr(ckpt_cfg, 'mode', ''))
+    if checkpoint_mode != str(mode):
+        return 0
+    try:
+        return max(0, int(ckpt.get('step', 0)))
+    except (TypeError, ValueError):
         return 0
 
 
@@ -562,12 +581,19 @@ def train(mode: str, cfg: ConfigDict) -> None:
     else:
         logging.info('Training batch prefetch disabled.')
 
+    resume_step_offset = _resume_step_offset(cfg, mode)
+    cfg.train.resume_step_offset = int(resume_step_offset)
+    if resume_step_offset > 0:
+        logging.info('Same-mode resume step offset: %d', int(resume_step_offset))
+
     wandb_mod = _maybe_wandb(cfg)
     ckpt_dir = _checkpoint_dir_for_run(cfg, wandb_mod)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     last_time = time.time()
+    last_logged_step = int(resume_step_offset)
     try:
-        for step in range(1, int(cfg.train.num_steps) + 1):
+        for local_step in range(1, int(cfg.train.num_steps) + 1):
+            step = int(resume_step_offset) + int(local_step)
             t0 = time.time()
             if prefetcher is None:
                 batch = _build_train_batch(mode=mode, sampler=sampler, cfg=cfg, policy_cfg=policy_cfg)
@@ -577,16 +603,18 @@ def train(mode: str, cfg: ConfigDict) -> None:
                 prefetch_queue_size = prefetcher.qsize()
             data_wait_s = time.time() - t0
             replicated_state, metrics = p_train_step(replicated_state, shard_batch(batch, num_devices))
-            if step == 1:
+            if local_step == 1:
                 jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else x, metrics)
             now = time.time()
-            if step == 1 or step % int(cfg.train.log_every) == 0:
+            if local_step == 1 or step % int(cfg.train.log_every) == 0:
+                steps_since_log = max(1, int(step) - int(last_logged_step))
                 metrics = dict(metrics)
                 metrics['data_wait_s'] = jnp.asarray(data_wait_s, dtype=jnp.float32)
                 metrics['prefetch_queue_size'] = jnp.asarray(prefetch_queue_size, dtype=jnp.float32)
-                metrics['step_s'] = jnp.asarray((now - last_time) / max(1, int(cfg.train.log_every)), dtype=jnp.float32)
+                metrics['step_s'] = jnp.asarray((now - last_time) / steps_since_log, dtype=jnp.float32)
                 _log_metrics('train', step, metrics, wandb_mod)
                 last_time = now
+                last_logged_step = int(step)
             _maybe_log_prediction_eval(
                 step=step,
                 cfg=cfg,
@@ -597,12 +625,12 @@ def train(mode: str, cfg: ConfigDict) -> None:
                 policy_cfg=policy_cfg,
                 eval_predict=eval_predict,
             )
-            if step % int(cfg.train.ckpt_every) == 0:
+            if local_step % int(cfg.train.ckpt_every) == 0:
                 path = ckpt_dir / f'step_{step:07d}.pkl'
                 save_checkpoint(path, state=replicated_state, step=step, config=cfg, replicated=True)
                 logging.info('Saved checkpoint: %s', path)
         path = ckpt_dir / 'last.pkl'
-        save_checkpoint(path, state=replicated_state, step=int(cfg.train.num_steps), config=cfg, replicated=True)
+        save_checkpoint(path, state=replicated_state, step=int(resume_step_offset) + int(cfg.train.num_steps), config=cfg, replicated=True)
         logging.info('Training complete. Final checkpoint: %s', path)
     finally:
         if prefetcher is not None:
