@@ -120,6 +120,10 @@ def get_config(mode: str = 'pretrain', encoder_type: str = 'perceiver') -> Confi
     cfg.maml.fast_param_top_layers = 2
     cfg.maml.inner_param_include = ()
     cfg.maml.inner_param_exclude = ()
+    cfg.maml.inner_query_microbatch_size = 0  # 0 disables WRITE gradient microbatching.
+    cfg.maml.outer_query_microbatch_size = 0  # 0 disables outer loss microbatching.
+    cfg.maml.remat_inner_loss = False
+    cfg.maml.remat_outer_loss = False
 
     cfg.wandb = ConfigDict()
     cfg.wandb.enable = False

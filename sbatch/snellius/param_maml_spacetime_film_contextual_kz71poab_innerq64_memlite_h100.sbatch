@@ -13,10 +13,9 @@
 set -euo pipefail
 
 # Memory-lite Q64 WRITE experiment.
-# Compared with the direct Q64 file, this keeps the large WRITE batch but:
-# - disables attention-stat materialization,
-# - uses one outer query-loss sample,
-# - enables cuda_malloc_async to reduce allocator fragmentation.
+# Compared with the direct Q64 file, this keeps the effective large WRITE batch
+# and outer query count, but computes them in microbatches and rematerializes
+# loss forwards to lower peak GPU memory.
 PRETRAINED_CHECKPOINT="/projects/prjs1905/robotics/rlbench/icil_jax_rlbench_runs/checkpoints/pretrain/kz71poab/step_0300000.pkl"
 
 if [[ ! -f "${PRETRAINED_CHECKPOINT}" ]]; then
@@ -71,7 +70,11 @@ srun --gres=gpu:4 python -m icil_jax_rlbench.param_maml_direct_regression \
   --config.data.task_sampling_alpha=0.8 \
   --config.maml.inner_steps=4 \
   --config.maml.num_inner_queries=64 \
-  --config.maml.num_query_loss_samples=1 \
+  --config.maml.inner_query_microbatch_size=16 \
+  --config.maml.num_query_loss_samples=4 \
+  --config.maml.outer_query_microbatch_size=1 \
+  --config.maml.remat_inner_loss=True \
+  --config.maml.remat_outer_loss=True \
   --config.maml.inner_lr=1e-2 \
   --config.maml.first_order=False \
   --config.maml.inner_grad_clip_norm=1.0 \

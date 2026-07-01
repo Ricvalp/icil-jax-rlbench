@@ -160,6 +160,10 @@ class StepConfig:
     fast_param_top_layers: int = 2
     inner_param_include: Tuple[str, ...] = ()
     inner_param_exclude: Tuple[str, ...] = ()
+    inner_query_microbatch_size: int = 0
+    outer_query_microbatch_size: int = 0
+    remat_inner_loss: bool = False
+    remat_outer_loss: bool = False
     log_attention_stats: bool = False
 
 
@@ -210,6 +214,28 @@ def _task_param_outer_loss(
     return loss, {'pred_l1': l1_loss(pred, task_batch['target_action']), **attn_stats}
 
 
+def _leading_size(batch: Dict[str, jnp.ndarray]) -> int:
+    return int(batch['target_action'].shape[0])
+
+
+def _leading_microbatch(batch: Dict[str, jnp.ndarray], index: jnp.ndarray, size: int) -> Dict[str, jnp.ndarray]:
+    start = index * int(size)
+    return jax.tree_util.tree_map(
+        lambda x: jax.lax.dynamic_slice_in_dim(x, start, int(size), axis=0),
+        batch,
+    )
+
+
+def _microbatch_size_or_full(requested: int, total: int) -> int:
+    requested = int(requested)
+    total = int(total)
+    if requested <= 0 or requested >= total:
+        return total
+    if total % requested != 0:
+        raise ValueError(f'Microbatch size {requested} must divide leading batch size {total}.')
+    return requested
+
+
 def create_param_maml_step(
     model: DirectRegressionPolicy,
     cfg: StepConfig,
@@ -222,12 +248,41 @@ def create_param_maml_step(
         task_rngs = jax.random.split(dropout_rng, B)
 
         def adapt_one(params, task_inner, task_query, task_rng):
-            def inner_loss_fn(p, step_batch):
+            def raw_inner_loss_fn(p, step_batch):
                 pred = model.apply({'params': p}, step_batch, train=True, rngs={'dropout': task_rng})
                 return action_loss(pred, step_batch['target_action'], cfg.loss_type)
 
+            inner_loss_fn = jax.checkpoint(raw_inner_loss_fn) if bool(cfg.remat_inner_loss) else raw_inner_loss_fn
+
+            def inner_loss_and_grad(p, step_batch):
+                total = _leading_size(step_batch)
+                micro = _microbatch_size_or_full(cfg.inner_query_microbatch_size, total)
+                if micro == total:
+                    return jax.value_and_grad(inner_loss_fn)(p, step_batch)
+                n_micro = total // micro
+                first_batch = _leading_microbatch(step_batch, jnp.asarray(0, dtype=jnp.int32), micro)
+                first_loss, first_grad = jax.value_and_grad(inner_loss_fn)(p, first_batch)
+
+                def micro_body(carry, micro_idx):
+                    loss_sum, grad_sum = carry
+                    micro_batch = _leading_microbatch(step_batch, micro_idx, micro)
+                    loss, grad = jax.value_and_grad(inner_loss_fn)(p, micro_batch)
+                    return (
+                        loss_sum + loss,
+                        jax.tree_util.tree_map(lambda a, b: a + b, grad_sum, grad),
+                    ), None
+
+                (loss_sum, grad_sum), _ = jax.lax.scan(
+                    micro_body,
+                    (first_loss, first_grad),
+                    jnp.arange(1, n_micro, dtype=jnp.int32),
+                )
+                inv_n = jnp.asarray(1.0 / float(n_micro), dtype=jnp.float32)
+                grad_mean = jax.tree_util.tree_map(lambda g: g * inv_n.astype(g.dtype), grad_sum)
+                return loss_sum * inv_n, grad_mean
+
             def body(p, step_batch):
-                loss, grad = jax.value_and_grad(inner_loss_fn)(p, step_batch)
+                loss, grad = inner_loss_and_grad(p, step_batch)
                 grad = apply_mask(grad, inner_mask)
                 grad, grad_norm = clip_tree_by_global_norm(grad, cfg.inner_grad_clip_norm)
                 if bool(cfg.first_order):
@@ -243,15 +298,72 @@ def create_param_maml_step(
                 adapted = params
                 inner_loss = jnp.asarray(0.0, dtype=jnp.float32)
                 inner_grad_norm = jnp.asarray(0.0, dtype=jnp.float32)
-            before, _ = _task_param_outer_loss(model, params, task_query, loss_type=cfg.loss_type, train=True, rng=task_rng)
-            after, out_metrics = _task_param_outer_loss(
-                model,
+
+            def raw_outer_loss_before_fn(p, query_batch):
+                return _task_param_outer_loss(
+                    model,
+                    p,
+                    query_batch,
+                    loss_type=cfg.loss_type,
+                    train=True,
+                    rng=task_rng,
+                    log_attention_stats=False,
+                )
+
+            def raw_outer_loss_after_fn(p, query_batch):
+                return _task_param_outer_loss(
+                    model,
+                    p,
+                    query_batch,
+                    loss_type=cfg.loss_type,
+                    train=True,
+                    rng=task_rng,
+                    log_attention_stats=bool(cfg.log_attention_stats),
+                )
+
+            outer_loss_before_fn = (
+                jax.checkpoint(raw_outer_loss_before_fn)
+                if bool(cfg.remat_outer_loss)
+                else raw_outer_loss_before_fn
+            )
+            outer_loss_after_fn = (
+                jax.checkpoint(raw_outer_loss_after_fn)
+                if bool(cfg.remat_outer_loss)
+                else raw_outer_loss_after_fn
+            )
+
+            def outer_loss_microbatched(p, query_batch, outer_loss_eval):
+                total = _leading_size(query_batch)
+                micro = _microbatch_size_or_full(cfg.outer_query_microbatch_size, total)
+                if micro == total:
+                    return outer_loss_eval(p, query_batch)
+                n_micro = total // micro
+                first_batch = _leading_microbatch(query_batch, jnp.asarray(0, dtype=jnp.int32), micro)
+                first_loss, first_metrics = outer_loss_eval(p, first_batch)
+
+                def micro_body(carry, micro_idx):
+                    loss_sum, metrics_sum = carry
+                    micro_batch = _leading_microbatch(query_batch, micro_idx, micro)
+                    loss, metrics = outer_loss_eval(p, micro_batch)
+                    return (
+                        loss_sum + loss,
+                        jax.tree_util.tree_map(lambda a, b: a + b, metrics_sum, metrics),
+                    ), None
+
+                (loss_sum, metrics_sum), _ = jax.lax.scan(
+                    micro_body,
+                    (first_loss, first_metrics),
+                    jnp.arange(1, n_micro, dtype=jnp.int32),
+                )
+                inv_n = jnp.asarray(1.0 / float(n_micro), dtype=jnp.float32)
+                metrics_mean = jax.tree_util.tree_map(lambda x: x * inv_n.astype(x.dtype), metrics_sum)
+                return loss_sum * inv_n, metrics_mean
+
+            before, _ = outer_loss_microbatched(params, task_query, outer_loss_before_fn)
+            after, out_metrics = outer_loss_microbatched(
                 adapted,
                 task_query,
-                loss_type=cfg.loss_type,
-                train=True,
-                rng=task_rng,
-                log_attention_stats=bool(cfg.log_attention_stats),
+                outer_loss_after_fn,
             )
             return after, {
                 'outer_loss_before': before,

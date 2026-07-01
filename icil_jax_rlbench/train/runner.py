@@ -205,6 +205,10 @@ def _step_config(cfg: ConfigDict) -> StepConfig:
         fast_param_top_layers=int(getattr(cfg.maml, 'fast_param_top_layers', 2)),
         inner_param_include=tuple(getattr(cfg.maml, 'inner_param_include', ())),
         inner_param_exclude=tuple(getattr(cfg.maml, 'inner_param_exclude', ())),
+        inner_query_microbatch_size=int(getattr(cfg.maml, 'inner_query_microbatch_size', 0)),
+        outer_query_microbatch_size=int(getattr(cfg.maml, 'outer_query_microbatch_size', 0)),
+        remat_inner_loss=bool(getattr(cfg.maml, 'remat_inner_loss', False)),
+        remat_outer_loss=bool(getattr(cfg.maml, 'remat_outer_loss', False)),
         log_attention_stats=bool(getattr(cfg.train, 'log_attention_stats', False)),
     )
 
