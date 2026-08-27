@@ -13,6 +13,41 @@ This directory is independent from the existing `icil/`, `icil_jax_query_memory/
 - Memory MAML/FOMAML fine-tuning where the inner loop updates encoded support-memory tokens.
 - Multi-device `pmap` training with global batch sharding.
 - Pickle checkpoints containing `params`, `opt_state`, `rng`, `step`, and config.
+- Adaptation-only fast-weight TTT on a controlled hidden-goal state benchmark.
+- Full-second-order KVB WRITE and matched FOMAML/action-BC ablations.
+- Closed-loop correct/no/wrong/shuffled support-control evaluation.
+- Gated RLBench space-time-supernode event-register and robotics-action utilities.
+
+## Fast-Weight TTT Restart
+
+The new mechanism-test path is separate from legacy parameter and memory MAML.
+Support can affect query prediction only by changing a small transient fast-weight
+state; prediction has no direct support input.
+
+Run full-second-order KVB training:
+
+```bash
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python -m icil_jax_rlbench.train_ttt_state \
+  --config=icil_jax_rlbench/configs/ttt_state_kvb.py
+```
+
+Run the fixed-meta-batch correctness gate:
+
+```bash
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python -m icil_jax_rlbench.eval.ttt_state_gate2 \
+  --config=icil_jax_rlbench/configs/ttt_state_gate2.py
+```
+
+Evaluate a trained checkpoint under matched support controls:
+
+```bash
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python -m icil_jax_rlbench.eval.ttt_state \
+  --config=icil_jax_rlbench/configs/eval_ttt_state.py \
+  --config.checkpoint_path=/path/to/last.pkl
+```
+
+See `IMPLEMENTATION_SUMMARY.md` for the gate sequence, ablation commands, exact
+gradient semantics, verification, and the deliberately gated RLBench phase.
 
 ## Main Commands
 
