@@ -1,232 +1,151 @@
-# Standalone JAX RLBench ICIL
+# Fast-Weight Test-Time Training for Robot Imitation
 
-This directory is independent from the existing `icil/`, `icil_jax_query_memory/`, and diagnostics code. It only assumes the dense RLBench H5 cache format already present under `ICIL_CACHE_ROOT`.
+This branch implements the adaptation-only fast-weight TTT program in
+`ICIL_TTT_IMPLEMENTATION_PLAN.md`. The former direct-regression pretraining,
+parameter-MAML, and memory-MAML paths have been removed deliberately.
 
-## Implemented
+The current executable benchmark is a self-contained hidden-goal state task. It
+is not MetaWorld. The RLBench visual encoder and action-loss primitives are
+present, but end-to-end RLBench TTT remains gated on successful held-out-latent
+state experiments.
 
-- Direct-regression in-context imitation policy in JAX/Flax.
-- RLBench dense H5 reader with optional full RAM preload.
-- Perceiver point-cloud encoder.
-- Supernode point-cloud tokenizer encoder.
-- Pretraining on cached support/query episodes.
-- Parameter MAML/FOMAML fine-tuning.
-- Memory MAML/FOMAML fine-tuning where the inner loop updates encoded support-memory tokens.
-- Multi-device `pmap` training with global batch sharding.
-- Pickle checkpoints containing `params`, `opt_state`, `rng`, `step`, and config.
-- Adaptation-only fast-weight TTT on a controlled hidden-goal state benchmark.
-- Full-second-order KVB WRITE and matched FOMAML/action-BC ablations.
-- Closed-loop correct/no/wrong/shuffled support-control evaluation.
-- Gated RLBench space-time-supernode event-register and robotics-action utilities.
+## Core Invariant
 
-## Fast-Weight TTT Restart
+Support demonstrations may affect a query prediction only by updating an
+explicit transient fast state. The prediction API receives:
 
-The new mechanism-test path is separate from legacy parameter and memory MAML.
-Support can affect query prediction only by changing a small transient fast-weight
-state; prediction has no direct support input.
-
-Run full-second-order KVB training:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python -m icil_jax_rlbench.train_ttt_state \
-  --config=icil_jax_rlbench/configs/ttt_state_kvb.py
+```text
+(slow parameters, adapted fast state, query observation) -> query action
 ```
 
-Run the fixed-meta-batch correctness gate:
+It has no support argument, task label, language input, or query-action input.
+Fast state is reset to meta-learned `W0` at each task boundary, adapted on
+support, and then frozen while evaluating independent query episodes.
+
+## Current Components
+
+- Synthetic 2D hidden-goal reach-and-grasp benchmark with disjoint train,
+  validation, and test goals.
+- Query-only base policy for the ordinary-adaptation upper bound.
+- Full-second-order key-value binding (KVB) WRITE objective.
+- Matched FOMAML and support action-BC WRITE ablations.
+- Closed-loop no/correct/wrong/shuffled-support controls.
+- Fixed-meta-batch gradient and update-direction diagnostics.
+- RLBench delta-translation, 6D-rotation, geodesic, and gripper losses.
+- RLBench space-time supernodes and small event registers for the later visual
+  phase.
+
+## Experiment Sequence
+
+Run the implementation-correctness gate first:
 
 ```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python -m icil_jax_rlbench.eval.ttt_state_gate2 \
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python -m icil_jax_rlbench.eval.ttt_state_gate2 \
   --config=icil_jax_rlbench/configs/ttt_state_gate2.py
 ```
 
-Evaluate a trained checkpoint under matched support controls:
+Train the query-only state policy:
 
 ```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python -m icil_jax_rlbench.eval.ttt_state \
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python -m icil_jax_rlbench.train_ttt_state \
+  --config=icil_jax_rlbench/configs/ttt_state_query_only.py
+```
+
+Run ordinary support adaptation on its checkpoint:
+
+```bash
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python -m icil_jax_rlbench.eval.ttt_state_gate1 \
+  --config=icil_jax_rlbench/configs/eval_ttt_state_gate1.py \
+  --config.checkpoint_path=/path/to/query_only/last.pkl
+```
+
+After Gate 1 passes, train the main KVB method:
+
+```bash
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python -m icil_jax_rlbench.train_ttt_state \
+  --config=icil_jax_rlbench/configs/ttt_state_kvb.py
+```
+
+Evaluate held-out goals under matched support controls:
+
+```bash
+PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python -m icil_jax_rlbench.eval.ttt_state \
   --config=icil_jax_rlbench/configs/eval_ttt_state.py \
-  --config.checkpoint_path=/path/to/last.pkl
+  --config.checkpoint_path=/path/to/kvb/last.pkl
 ```
 
-See `IMPLEMENTATION_SUMMARY.md` for the gate sequence, ablation commands, exact
-gradient semantics, verification, and the deliberately gated RLBench phase.
+Matched ablations use `ttt_state_fomaml.py` and
+`ttt_state_action_bc.py`. Run at least three training seeds before drawing a
+conclusion from held-out adaptation.
 
-## Main Commands
+## Acceptance Signal
 
-Pretrain Perceiver:
+The intended Gate 3 result is:
+
+```text
+correct support > no update approximately wrong or shuffled support
+```
+
+Before moving to RLBench, require either at least 15 points of absolute
+closed-loop success improvement or at least a 30% relative query-loss reduction,
+with confidence intervals excluding zero and substantially smaller gains from
+wrong or shuffled support.
+
+## Outputs and Resume
+
+Each training run creates a unique directory under `train.output_dir` and writes:
+
+- `resolved_config.json`;
+- `provenance.json`;
+- `task_splits.json`;
+- `normalizer.json`;
+- `benchmark_integrity.json`;
+- periodic `step_XXXXXXX.pkl` checkpoints and `last.pkl`.
+
+Checkpoints contain slow parameters, meta-learned `W0`, optimizer state, RNG,
+configuration, and provenance. They never contain task-specific adapted fast
+state. Resume with:
 
 ```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/pretrain_direct_regression.py \
-  --config=icil_jax_rlbench/configs/pretrain_perceiver.py
+--config.train.resume_path=/path/to/checkpoint.pkl \
+--config.train.num_steps=40000
 ```
 
-Pretrain Supernode:
+`train.num_steps` is the final target step, not an additional-step count.
+
+## Repository Layout
+
+- `icil_jax_rlbench/data/hidden_goal.py`: controlled benchmark and meta-sampler.
+- `icil_jax_rlbench/models/fast_weight_ttt.py`: WRITE, READ, and fast-state logic.
+- `icil_jax_rlbench/train/ttt_step.py`: meta-objective and JIT/pmap steps.
+- `icil_jax_rlbench/train/ttt_runner.py`: training, validation, ledger, and resume.
+- `icil_jax_rlbench/eval/ttt_state*.py`: Gates 1-3.
+- `icil_jax_rlbench/models/ttt_supernode.py`: visual event-register bridge.
+- `icil_jax_rlbench/models/robotics_actions.py`: RLBench action geometry/losses.
+- `icil_jax_rlbench/data/h5_cache.py`: retained dense RLBench H5 reader.
+
+## RLBench Cache Contract
+
+The retained reader expects `CACHE_ROOT/task_name/variationN.h5`, with episode
+groups containing `xyz`, `valid`, `state`, and `action`; `rgb` and `mask_id` are
+optional. Shapes must be inferred from data rather than hard-coded.
+
+There is currently no RLBench TTT sampler, trainer, or online evaluator. Those
+belong to the visual phase after Gate 3.
+
+## Verification
 
 ```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/pretrain_direct_regression.py \
-  --config=icil_jax_rlbench/configs/pretrain_supernode.py
+python -m compileall -q icil_jax_rlbench tests
+PYTHONPATH=. pytest -q
+rg -n "^(from|import) (icil|icil_jax_query_memory|diagnostics|metaworld)(\\.|\\s|$)" \
+  icil_jax_rlbench tests
 ```
 
-Full second-order parameter MAML:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/param_maml_direct_regression.py \
-  --config=icil_jax_rlbench/configs/param_maml_perceiver.py \
-  --config.maml.first_order=False
-```
-
-FOMAML parameter fine-tuning:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/param_maml_direct_regression.py \
-  --config=icil_jax_rlbench/configs/param_maml_perceiver.py \
-  --config.maml.first_order=True
-```
-
-Full second-order memory MAML:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/memory_maml_direct_regression.py \
-  --config=icil_jax_rlbench/configs/memory_maml_perceiver.py \
-  --config.maml.first_order=False
-```
-
-Enable full cache preload:
-
-```bash
---config.data.preload_to_memory=True --config.data.keep_open=False
-```
-
-## Environment Setup
-
-Source the environment script for the machine you are using after activating the
-Python/JAX environment and before launching training:
-
-```bash
-# Local workstation
-source ./env_jax_rlbench_local.sh
-
-# DAS
-source ./env_jax_rlbench_das.sh
-
-# Snellius
-source ./env_jax_rlbench_snellius.sh
-```
-
-These scripts set the dense cache root, output/checkpoint/profile roots, W&B
-defaults, and JAX runtime flags:
-
-- `ICIL_CACHE_ROOT`: dense RLBench H5 cache.
-- `ICIL_JAX_RLBENCH_RUN_ROOT`: base directory for run artifacts.
-- `ICIL_JAX_RLBENCH_OUTPUT_DIR`: general output directory.
-- `ICIL_JAX_RLBENCH_CHECKPOINT_DIR`: checkpoint root; configs append the training mode and the runner appends the W&B run id, or a timestamp when W&B is disabled.
-- `ICIL_JAX_RLBENCH_PROFILE_DIR`: profiling output directory.
-- `ICIL_JAX_RLBENCH_WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_MODE`: W&B defaults.
-- `XLA_PYTHON_CLIENT_PREALLOCATE=false` and `PYTHONUNBUFFERED=1`.
-
-The local script also sets CoppeliaSim/X11 variables for local RLBench
-evaluation. Training commands still need this repo on `PYTHONPATH`, as shown in
-the main commands above.
-
-W&B is disabled by default in the configs; enable it with
-`--config.wandb.enable=True`. Resume or fine-tune checkpoint paths are passed
-through config flags:
-
-```bash
-PYTHONPATH=. XLA_PYTHON_CLIENT_PREALLOCATE=false python icil_jax_rlbench/pretrain_direct_regression.py \
-  --config=icil_jax_rlbench/configs/pretrain_perceiver.py \
-  --config.train.resume_path=/path/to/step_0100000.pkl
-```
-
-Switch encoder:
-
-```bash
---config.model.encoder.encoder_type=supernode
-```
-
-## Important Configs
-
-- `data.K`: number of support demonstrations.
-- `data.L`: support keyframes sampled per demonstration.
-- `data.T_obs`: query observation history length.
-- `data.H`: predicted action chunk length.
-- `data.stride`: temporal stride for observations/actions.
-- `data.traj_len`: fixed support action trajectory tokens per demo.
-- `data.preload_to_memory`: load all H5 arrays into host RAM at startup.
-- `train.prefetch_workers`: background threads that build training batches.
-- `train.prefetch_batches`: number of ready batches to keep queued.
-- `model.encoder.encoder_type`: `perceiver` or `supernode`.
-- `model.encoder.use_rgb`: include dense RGB point features.
-- `model.encoder.support_num_latents`: compressed support-memory token count.
-- `maml.first_order`: `False` gives full second-order MAML; `True` gives FOMAML.
-- `maml.inner_param_include`: optional substring filters for parameter inner-loop updates.
-- `maml.inner_lr`: inner-loop learning rate.
-
-## Notes
-
-The first version intentionally implements the direct-regression path only. It does not convert old checkpoints and does not import any existing repo modules. Parameter MAML can update all parameters by default; memory MAML updates only the encoded support-memory tokens in the inner loop.
-
-Resume / fine-tune from a pretraining checkpoint while resetting the outer optimizer:
-
-```bash
---config.train.resume_path=/path/to/pretrain.pkl \
---config.train.resume_optimizer=False \
---config.train.resume_rng=False
-```
-
-Checkpoints are written under `train.checkpoint_dir/<run-id>`. By default,
-`train.checkpoint_dir` is `${ICIL_JAX_RLBENCH_CHECKPOINT_DIR}/<mode>`, so
-pretraining with W&B enabled saves to `.../checkpoints/pretrain/<wandb-run-id>`.
-When W&B is disabled, the final directory name is the current date and time.
-
-Optional decoder memory-attention logging:
-
-```bash
---config.train.log_attention_stats=True
-```
-
-This adds the following metrics. The default is `False`, so the normal training path does not request attention weights.
-
-- `train/attn_memory_entropy`: normalized entropy of decoder cross-attention over support/memory tokens; uniform attention is near 1, selective attention is closer to 0.
-- `train/attn_memory_max`: max probability after renormalizing attention over support/memory tokens only.
-- `train/attn_memory_raw_max`: max raw cross-attention probability assigned to a support/memory token.
-- `train/attn_memory_mass`: total raw cross-attention probability mass assigned to support/memory tokens.
-- `train/attn_query_entropy`: normalized entropy of decoder cross-attention over query tokens.
-
-When W&B is enabled, training also logs periodic prediction diagnostics by
-default:
-
-```bash
---config.wandb.prediction_log_every=200 \
---config.wandb.prediction_num_samples=64 \
---config.wandb.prediction_num_plots=4
-```
-
-At each logging step it samples pretrain-style batches from the training task
-pool and, if `data.exclude_tasks` is set, from the excluded task pool. It logs
-`eval/train_mse`, optional `eval/excluded_mse`, and Plotly 3D action-chunk
-figures comparing decoded predicted XYZ chunks with ground truth chunks.
-
-## Online RLBench Evaluation
-
-Pretrained/direct checkpoint:
-
-```bash
-PYTHONPATH=. python -m icil_jax_rlbench.eval.pretrained_direct_regression \
-  --config=icil_jax_rlbench/configs/eval_online_pretrained.py \
-  --config.checkpoint_path=eval_checkpoints/zzpdg8kj/step_0070000.pkl \
-  --config.task.name=push_button \
-  --config.task.variation=0
-```
-
-Param-MAML/FOMAML checkpoint with fast parameter adaptation from cached support:
-
-```bash
-PYTHONPATH=. python -m icil_jax_rlbench.eval.param_maml_direct_regression \
-  --config=icil_jax_rlbench/configs/eval_online_param_maml.py \
-  --config.checkpoint_path=/path/to/maml/step_XXXXXXX.pkl \
-  --config.task.name=push_button \
-  --config.task.variation=0
-```
-
-Both evaluators use cached support trajectories from `ICIL_CACHE_ROOT` by
-default, JIT the JAX forward path, run RLBench online rollouts, and write
-`summary.json` plus optional videos under `eval_outputs/`.
+See `IMPLEMENTATION_SUMMARY.md` for implemented gradient semantics, known limits,
+and the current diagnostic status.

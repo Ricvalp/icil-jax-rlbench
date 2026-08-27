@@ -4,7 +4,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from icil_jax_rlbench.models.encoders import EncoderConfig
 from icil_jax_rlbench.models.ttt_supernode import (
     RLBenchTTTFeatureEncoder,
     TTTEventEncoderConfig,
@@ -21,8 +20,7 @@ from icil_jax_rlbench.models.fast_weight_ttt import (
 
 
 def test_spacetime_supernodes_produce_small_sequential_registers():
-    encoder_cfg = EncoderConfig(
-        encoder_type='supernode',
+    cfg = TTTEventEncoderConfig(
         d_model=16,
         n_heads=4,
         use_rgb=False,
@@ -32,9 +30,6 @@ def test_spacetime_supernodes_produce_small_sequential_registers():
         spacetime_supernodes=4,
         spacetime_layers=1,
         supernode_center_sampling='linspace',
-    )
-    cfg = TTTEventEncoderConfig(
-        encoder=encoder_cfg,
         support_registers=3,
         query_registers=2,
         register_layers=1,
@@ -67,17 +62,15 @@ def test_spacetime_supernodes_produce_small_sequential_registers():
 
 
 def test_supernode_occupancy_and_bandwidth_metrics_are_finite():
-    encoder_cfg = EncoderConfig(
-        encoder_type='supernode',
+    cfg = TTTEventEncoderConfig(
         d_model=8,
         n_heads=2,
         use_rgb=False,
         spacetime_supernodes=3,
         spacetime_layers=0,
         supernode_center_sampling='linspace',
-    )
-    cfg = TTTEventEncoderConfig(
-        encoder=encoder_cfg, support_registers=2, query_registers=1
+        support_registers=2,
+        query_registers=1,
     )
     model = RLBenchTTTFeatureEncoder(cfg, state_dim=8, action_dim=8)
     support = {

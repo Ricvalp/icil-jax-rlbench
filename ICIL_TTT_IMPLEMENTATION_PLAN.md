@@ -1,5 +1,10 @@
 # Implementation Plan: Fast-Weight Test-Time Training for In-Context Robot Imitation
 
+> **Branch decision (2026-08-27):** after the initial implementation, the user
+> explicitly requested removal of the legacy direct-regression pretraining,
+> parameter-MAML, and memory-MAML paths for cleanliness. That decision supersedes
+> this document's legacy-preservation requirements on `fast-weight-ttt`.
+
 **Audience:** Codex working directly in [`Ricvalp/icil-jax-rlbench`](https://github.com/Ricvalp/icil-jax-rlbench)  
 **Repository branch inspected:** public `master`, as available on 2026-08-26  
 **Primary objective:** make gradient-based test-time adaptation from one or a few demonstrations work for in-context robot imitation, first in a controlled state-based benchmark and then in RLBench with the space-time supernode encoder.  

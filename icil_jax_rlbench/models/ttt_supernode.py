@@ -7,24 +7,202 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-from .encoders import (
-    EncoderConfig,
-    PointFeatureEmbed,
-    SupernodeFrameTokenizer,
-    _supernode_center_indices,
-)
-from .perceiver import LatentPerceiver, SelfAttentionStack
+from .attention import TransformerConfig
+from .perceiver import LatentPerceiver, PerceiverConfig, SelfAttentionStack
 
 
 @dataclass(frozen=True)
 class TTTEventEncoderConfig:
-    encoder: EncoderConfig
+    d_model: int = 256
+    n_heads: int = 4
+    dropout: float = 0.0
+    mlp_mult: int = 4
+    supernodes: int = 64
+    supernode_temperature: float = 0.005
+    supernode_center_sampling: str = 'linspace'
+    supernode_layers: int = 2
+    spacetime_supernodes: int = 256
+    spacetime_temperature_xyz: float = 0.005
+    spacetime_temperature_t: float = 0.04
+    spacetime_layers: int = 2
+    mask_id_vocab: int = 256
+    use_rgb: bool = True
+    use_mask_id: bool = False
     support_registers: int = 16
     query_registers: int = 8
     register_layers: int = 1
     min_bandwidth: float = 1e-4
     occupancy_threshold: float = 1e-3
     learnable_bandwidths: bool = True
+
+    def transformer(self) -> TransformerConfig:
+        return TransformerConfig(
+            d_model=int(self.d_model),
+            n_heads=int(self.n_heads),
+            mlp_mult=int(self.mlp_mult),
+            dropout=float(self.dropout),
+        )
+
+    def perceiver(self, *, num_latents: int) -> PerceiverConfig:
+        return PerceiverConfig(
+            d_model=int(self.d_model),
+            n_heads=int(self.n_heads),
+            n_layers=int(self.register_layers),
+            num_latents=int(num_latents),
+            mlp_mult=int(self.mlp_mult),
+            dropout=float(self.dropout),
+        )
+
+
+class _PointFeatureEmbed(nn.Module):
+    cfg: TTTEventEncoderConfig
+
+    @nn.compact
+    def __call__(
+        self,
+        xyz: jax.Array,
+        *,
+        rgb: Optional[jax.Array] = None,
+        mask_id: Optional[jax.Array] = None,
+    ) -> jax.Array:
+        pieces = [xyz.astype(jnp.float32)]
+        if bool(self.cfg.use_rgb) and rgb is not None:
+            pieces.append(rgb.astype(jnp.float32))
+        features = nn.Dense(int(self.cfg.d_model), name='xyz_rgb_projection')(
+            jnp.concatenate(pieces, axis=-1)
+        )
+        if bool(self.cfg.use_mask_id) and mask_id is not None:
+            vocab = int(self.cfg.mask_id_vocab)
+            indices = jnp.clip(mask_id.astype(jnp.int32), 0, vocab - 1)
+            features = features + nn.Embed(vocab, int(self.cfg.d_model), name='mask_embedding')(
+                indices
+            )
+        return features
+
+
+def _linspace_center_indices(
+    batch_size: int, num_points: int, num_centers: int
+) -> jax.Array:
+    indices = jnp.linspace(
+        0, max(int(num_points) - 1, 0), int(num_centers)
+    ).round().astype(jnp.int32)
+    return jnp.broadcast_to(indices[None, :], (int(batch_size), int(num_centers)))
+
+
+def _mask_balanced_center_indices(
+    valid: jax.Array, mask_id: jax.Array, num_centers: int
+) -> jax.Array:
+    valid = valid.astype(jnp.bool_)
+    mask_id = mask_id.astype(jnp.int32)
+    batch, points = map(int, valid.shape)
+    centers = int(num_centers)
+
+    def one_row(row_valid: jax.Array, row_mask: jax.Array) -> jax.Array:
+        invalid_mask = jnp.asarray(jnp.iinfo(jnp.int32).max, dtype=jnp.int32)
+        safe_mask = jnp.where(row_valid, row_mask, invalid_mask)
+        order = jnp.argsort(safe_mask, stable=True)
+        sorted_valid = row_valid[order]
+        sorted_mask = safe_mask[order]
+
+        previous_mask = jnp.concatenate(
+            [jnp.asarray([-1], dtype=jnp.int32), sorted_mask[:-1]], axis=0
+        )
+        group_start = (sorted_mask != previous_mask) & sorted_valid
+        group_id = jnp.cumsum(group_start.astype(jnp.int32), axis=0) - 1
+        safe_group_id = jnp.maximum(group_id, 0)
+
+        sorted_position = jnp.arange(points, dtype=jnp.int32)
+        start_position = jnp.where(group_start, sorted_position, 0)
+        group_start_position = jax.lax.associative_scan(
+            jnp.maximum, start_position, axis=0
+        )
+        rank_in_group = sorted_position - group_start_position
+        group_counts = jnp.bincount(
+            safe_group_id,
+            weights=sorted_valid.astype(jnp.float32),
+            length=points,
+        )
+        count = jnp.maximum(group_counts[safe_group_id], 1.0)
+        rank_fraction = rank_in_group.astype(jnp.float32) / count
+        group_tie = safe_group_id.astype(jnp.float32) / float(max(points, 1))
+        balanced_key = rank_fraction + 1e-3 * group_tie
+        invalid_key = 2.0 + sorted_position.astype(jnp.float32) / float(
+            max(points, 1)
+        )
+        balanced_key = jnp.where(sorted_valid, balanced_key, invalid_key)
+        balanced_order = jnp.argsort(balanced_key, stable=True)
+        take_position = jnp.arange(centers, dtype=jnp.int32) % max(points, 1)
+        return order[balanced_order[take_position]]
+
+    return jax.vmap(one_row)(valid, mask_id).reshape(batch, centers)
+
+
+def _supernode_center_indices(
+    *,
+    valid: jax.Array,
+    mask_id: Optional[jax.Array],
+    num_centers: int,
+    center_sampling: str,
+) -> jax.Array:
+    batch, points = map(int, valid.shape)
+    if str(center_sampling) == 'mask_balanced' and mask_id is not None:
+        return _mask_balanced_center_indices(valid, mask_id, int(num_centers))
+    if str(center_sampling) != 'linspace':
+        raise ValueError(
+            "supernode_center_sampling must be 'linspace' or 'mask_balanced'."
+        )
+    return _linspace_center_indices(batch, points, int(num_centers))
+
+
+class _SupernodeFrameTokenizer(nn.Module):
+    cfg: TTTEventEncoderConfig
+
+    @nn.compact
+    def __call__(
+        self,
+        xyz: jax.Array,
+        state: jax.Array,
+        valid: jax.Array,
+        *,
+        rgb: Optional[jax.Array] = None,
+        mask_id: Optional[jax.Array] = None,
+        train: bool = False,
+    ) -> Tuple[jax.Array, jax.Array]:
+        center_indices = _supernode_center_indices(
+            valid=valid,
+            mask_id=mask_id,
+            num_centers=int(self.cfg.supernodes),
+            center_sampling=str(self.cfg.supernode_center_sampling),
+        )
+        point_tokens = _PointFeatureEmbed(self.cfg, name='point_embed')(
+            xyz, rgb=rgb, mask_id=mask_id
+        )
+        centers = jnp.take_along_axis(
+            xyz.astype(jnp.float32), center_indices[:, :, None], axis=1
+        )
+        distance = jnp.sum(
+            jnp.square(centers[:, :, None, :] - xyz[:, None, :, :]), axis=-1
+        )
+        logits = -distance / max(float(self.cfg.supernode_temperature), 1e-6)
+        logits = jnp.where(
+            valid[:, None, :].astype(jnp.bool_), logits, jnp.asarray(-1e9)
+        )
+        weights = jax.nn.softmax(logits, axis=-1)
+        supernodes = jnp.einsum(
+            'bmn,bnd->bmd', weights.astype(point_tokens.dtype), point_tokens
+        )
+        state_token = nn.Dense(int(self.cfg.d_model), name='state_projection')(
+            state.astype(jnp.float32)
+        )[:, None, :]
+        tokens = jnp.concatenate([supernodes, state_token], axis=1)
+        token_mask = jnp.ones(tokens.shape[:-1], dtype=jnp.bool_)
+        if int(self.cfg.supernode_layers) > 0:
+            tokens = SelfAttentionStack(
+                self.cfg.transformer(),
+                int(self.cfg.supernode_layers),
+                name='supernode_refinement',
+            )(tokens, mask=token_mask, train=train)
+        return tokens, token_mask
 
 
 def _inverse_softplus(value: float) -> float:
@@ -63,7 +241,7 @@ class SpacetimeEventEncoder(nn.Module):
         batch, segments, frames, points = map(int, xyz.shape[:4])
         flat_batch = batch * segments
         point_count = frames * points
-        encoder_cfg = self.cfg.encoder
+        encoder_cfg = self.cfg
         d_model = int(encoder_cfg.d_model)
         supernode_count = int(encoder_cfg.spacetime_supernodes)
         if supernode_count <= 0:
@@ -82,7 +260,7 @@ class SpacetimeEventEncoder(nn.Module):
             if mask_id is None
             else mask_id.reshape(flat_batch, point_count)
         )
-        point_tokens = PointFeatureEmbed(encoder_cfg, name='point_embed')(
+        point_tokens = _PointFeatureEmbed(encoder_cfg, name='point_embed')(
             flat_xyz, rgb=flat_rgb, mask_id=flat_mask_id
         )
         center_indices = _supernode_center_indices(
@@ -192,15 +370,12 @@ class SpacetimeEventEncoder(nn.Module):
         )
         if int(encoder_cfg.spacetime_layers) > 0:
             tokens = SelfAttentionStack(
-                encoder_cfg.tx(),
+                encoder_cfg.transformer(),
                 int(encoder_cfg.spacetime_layers),
                 name='event_refinement',
             )(tokens, mask=token_mask, train=train)
         registers = LatentPerceiver(
-            encoder_cfg.perceiver(
-                num_latents=int(self.cfg.support_registers),
-                n_layers=int(self.cfg.register_layers),
-            ),
+            encoder_cfg.perceiver(num_latents=int(self.cfg.support_registers)),
             name='event_registers',
         )(tokens, token_mask=token_mask, train=train)
         registers = registers.reshape(
@@ -260,14 +435,9 @@ class RLBenchTTTFeatureEncoder(nn.Module):
         self.support_events = SpacetimeEventEncoder(
             self.cfg, self.state_dim, self.action_dim, name='support_events'
         )
-        self.query_frames = SupernodeFrameTokenizer(
-            self.cfg.encoder, name='query_frames'
-        )
+        self.query_frames = _SupernodeFrameTokenizer(self.cfg, name='query_frames')
         self.query_registers = LatentPerceiver(
-            self.cfg.encoder.perceiver(
-                num_latents=int(self.cfg.query_registers),
-                n_layers=int(self.cfg.register_layers),
-            ),
+            self.cfg.perceiver(num_latents=int(self.cfg.query_registers)),
             name='query_registers',
         )
 
