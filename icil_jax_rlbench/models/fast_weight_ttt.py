@@ -22,9 +22,12 @@ class FastWeightTTTConfig:
     gate_init: float = 1e-3
     inner_lr_init: float = 3e-2
     inner_lr_min: float = 1e-5
+    translation_output: str = 'tanh'  # tanh | linear
     translation_loss_weight: float = 1.0
     gripper_loss_weight: float = 0.25
     translation_huber_delta: float = 0.1
+    gripper_loss: str = 'binary_cross_entropy'  # binary_cross_entropy | huber
+    gripper_huber_delta: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -73,8 +76,13 @@ def _layer_norm(x: jax.Array, eps: float = 1e-5) -> jax.Array:
 
 
 def _l2_normalize(x: jax.Array, eps: float = 1e-6) -> jax.Array:
-    norm = jnp.sqrt(jnp.sum(jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True))
-    return x / jnp.maximum(norm, float(eps))
+    squared_norm = jnp.sum(
+        jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True
+    )
+    inverse_norm = jax.lax.rsqrt(
+        jnp.maximum(squared_norm, float(eps) * float(eps))
+    )
+    return x * inverse_norm.astype(x.dtype)
 
 
 def _inverse_softplus(value: float) -> jax.Array:
@@ -88,6 +96,12 @@ def init_fast_weight_ttt_params(
 ) -> Dict[str, PyTree]:
     if str(cfg.fast_model) not in ('linear', 'mlp'):
         raise ValueError("fast_model must be 'linear' or 'mlp'.")
+    if str(cfg.translation_output) not in ('tanh', 'linear'):
+        raise ValueError("translation_output must be 'tanh' or 'linear'.")
+    if str(cfg.gripper_loss) not in ('binary_cross_entropy', 'huber'):
+        raise ValueError(
+            "gripper_loss must be 'binary_cross_entropy' or 'huber'."
+        )
     if int(cfg.action_dim) != int(cfg.translation_dim) + 1:
         raise ValueError('The state policy expects translation components plus one gripper logit.')
     keys = iter(jax.random.split(rng, 16))
@@ -227,14 +241,20 @@ def predict_action(
     hidden = read_fast_memory(
         params, fast_state, hidden, cfg, read_enabled=read_enabled
     )
-    translation = jnp.tanh(_linear(params['translation_head'], hidden))
+    translation = _linear(params['translation_head'], hidden)
+    if str(cfg.translation_output) == 'tanh':
+        translation = jnp.tanh(translation)
     gripper_logit = _linear(params['gripper_head'], hidden)
     return jnp.concatenate([translation, gripper_logit], axis=-1)
 
 
 def executable_action(prediction: jax.Array, cfg: FastWeightTTTConfig) -> jax.Array:
     translation = jnp.clip(prediction[..., : int(cfg.translation_dim)], -1.0, 1.0)
-    gripper = jax.nn.sigmoid(prediction[..., int(cfg.translation_dim) :])
+    gripper_prediction = prediction[..., int(cfg.translation_dim) :]
+    if str(cfg.gripper_loss) == 'binary_cross_entropy':
+        gripper = jax.nn.sigmoid(gripper_prediction)
+    else:
+        gripper = jnp.clip(gripper_prediction, -1.0, 1.0)
     return jnp.concatenate([translation, gripper], axis=-1)
 
 
@@ -247,6 +267,15 @@ def _masked_mean(value: jax.Array, mask: jax.Array) -> jax.Array:
     return numerator / jnp.maximum(denominator, 1.0)
 
 
+def _huber_element(error: jax.Array, delta: float) -> jax.Array:
+    absolute = jnp.abs(error)
+    return jnp.where(
+        absolute <= float(delta),
+        0.5 * jnp.square(error) / max(float(delta), 1e-6),
+        absolute - 0.5 * float(delta),
+    )
+
+
 def robotics_action_loss(
     prediction: jax.Array,
     target: jax.Array,
@@ -256,19 +285,36 @@ def robotics_action_loss(
     translation_prediction = prediction[..., : int(cfg.translation_dim)]
     translation_target = target[..., : int(cfg.translation_dim)]
     error = translation_prediction - translation_target
-    delta = float(cfg.translation_huber_delta)
-    absolute = jnp.abs(error)
-    translation_element = jnp.where(
-        absolute <= delta,
-        0.5 * jnp.square(error) / max(delta, 1e-6),
-        absolute - 0.5 * delta,
-    )
+    translation_element = _huber_element(error, float(cfg.translation_huber_delta))
     translation_loss = _masked_mean(translation_element, mask)
-    gripper_logit = prediction[..., int(cfg.translation_dim)]
+    gripper_prediction = prediction[..., int(cfg.translation_dim)]
     gripper_target = target[..., int(cfg.translation_dim)]
-    gripper_element = jnp.maximum(gripper_logit, 0.0) - (
-        gripper_logit * gripper_target
-    ) + jnp.log1p(jnp.exp(-jnp.abs(gripper_logit)))
+    gripper_error = gripper_prediction - gripper_target
+    if str(cfg.gripper_loss) == 'binary_cross_entropy':
+        gripper_element = jnp.maximum(gripper_prediction, 0.0) - (
+            gripper_prediction * gripper_target
+        ) + jnp.log1p(jnp.exp(-jnp.abs(gripper_prediction)))
+        gripper_accuracy = _masked_mean(
+            (
+                (jax.nn.sigmoid(gripper_prediction) >= 0.5)
+                == (gripper_target >= 0.5)
+            ).astype(jnp.float32),
+            mask,
+        )
+    elif str(cfg.gripper_loss) == 'huber':
+        gripper_element = _huber_element(
+            gripper_error, float(cfg.gripper_huber_delta)
+        )
+        gripper_accuracy = _masked_mean(
+            (jnp.abs(gripper_error) <= float(cfg.gripper_huber_delta)).astype(
+                jnp.float32
+            ),
+            mask,
+        )
+    else:
+        raise ValueError(
+            "gripper_loss must be 'binary_cross_entropy' or 'huber'."
+        )
     gripper_loss = _masked_mean(gripper_element, mask)
     total = (
         float(cfg.translation_loss_weight) * translation_loss
@@ -278,13 +324,8 @@ def robotics_action_loss(
         'translation_loss': translation_loss,
         'gripper_loss': gripper_loss,
         'translation_l1': _masked_mean(jnp.abs(error), mask),
-        'gripper_accuracy': _masked_mean(
-            (
-                (jax.nn.sigmoid(gripper_logit) >= 0.5)
-                == (gripper_target >= 0.5)
-            ).astype(jnp.float32),
-            mask,
-        ),
+        'gripper_l1': _masked_mean(jnp.abs(gripper_error), mask),
+        'gripper_accuracy': gripper_accuracy,
     }
 
 
@@ -308,7 +349,8 @@ def _clip_each_fast_tensor(tree: PyTree, max_norm: float) -> PyTree:
         return tree
 
     def clip(value: jax.Array) -> jax.Array:
-        norm = jnp.sqrt(jnp.sum(jnp.square(value.astype(jnp.float32))))
+        squared_norm = jnp.sum(jnp.square(value.astype(jnp.float32)))
+        norm = jnp.sqrt(jnp.maximum(squared_norm, 1e-16))
         scale = jnp.minimum(1.0, float(max_norm) / (norm + 1e-8))
         return value * scale.astype(value.dtype)
 

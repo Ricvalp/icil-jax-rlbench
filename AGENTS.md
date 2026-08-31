@@ -4,8 +4,9 @@ Instructions for coding agents working on the `fast-weight-ttt` branch.
 
 ## Hard Constraints
 
-- Keep the repository standalone. Do not import from `icil`,
-  `icil_jax_query_memory`, `diagnostics`, or MetaWorld code.
+- Do not import from `icil`, `icil_jax_query_memory`, `diagnostics`, or the
+  upstream `metaworld` package. Use only public `phi_mujoco` contracts for the
+  explicitly requested MetaWorld policy experiment.
 - The legacy direct-regression pretraining, parameter-MAML, and memory-MAML paths
   were intentionally removed. Do not restore them unless the user explicitly
   asks.
@@ -57,6 +58,11 @@ Do not interpret a passing Gate 2 as evidence of held-out adaptation.
 
 ## Directory Structure
 
+- `data/metaworld_ml1_reach.py`: task-aware phi cache, normalization, and
+  support/query samplers.
+- `train/metaworld_query_runner.py`: support-free ML1 Reach behavior cloning.
+- `eval/metaworld_ml1_reach_gate1.py`: ordinary-adaptation upper bound.
+- `eval/metaworld_policy.py`: JAX implementation of the phi policy interface.
 - `data/hidden_goal.py`: controlled environment, task splits, normalization,
   samplers, and integrity checks.
 - `models/fast_weight_ttt.py`: state-policy KVB WRITE and gated READ.
@@ -71,11 +77,16 @@ Do not interpret a passing Gate 2 as evidence of held-out adaptation.
 
 ## Controlled Benchmark Contract
 
-The hidden latent is a 2D goal excluded from the four-dimensional observation
-`[x, y, gripper, phase]`. The action is normalized planar delta plus a binary
-gripper target. Train, validation, and test goals are disjoint. Support and query
-episode IDs and initial states must not overlap. Fit normalization from training
-goals only.
+The first scientific experiment uses the `phi_mujoco`
+`metaworld_ml1_reach` integration: 40/10/50 disjoint tasks, hidden goal slots,
+39D state, and 4D continuous action. Never pass task IDs or provenance goals to
+the model. Fit observation and action normalization only from training-task
+episodes. Support, offline query, and fresh closed-loop query starts must not
+overlap.
+
+The synthetic diagnostic has a 2D goal excluded from `[x, y, gripper, phase]`
+and a normalized planar-delta-plus-binary-gripper action. Its train,
+validation, and test goals are also disjoint.
 
 Meta-batches retain explicit task, support-demo, support-time, query-demo, and
 query-time axes. Do not collapse those semantic axes in the sampler.
@@ -104,8 +115,8 @@ translation, continuous 6D rotation with geodesic loss, and gripper BCE.
 Always run:
 
 ```bash
-python -m compileall -q icil_jax_rlbench tests
-PYTHONPATH=. pytest -q
+uv run --frozen --group metaworld python -m compileall -q icil_jax_rlbench tests
+uv run --frozen --group metaworld pytest -q
 rg -n "^(from|import) (icil|icil_jax_query_memory|diagnostics|metaworld)(\\.|\\s|$)" \
   icil_jax_rlbench tests
 ```

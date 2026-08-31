@@ -18,6 +18,8 @@ from icil_jax_rlbench.data.hidden_goal import (
     StateNormalizer,
 )
 from icil_jax_rlbench.eval.ttt_state_common import (
+    SUPPORTED_CONDITIONS,
+    bootstrap_mean_confidence_interval,
     condition_support,
     confidence_interval,
     random_fast_state_with_matched_delta,
@@ -46,23 +48,68 @@ _CONFIG = config_flags.DEFINE_config_file(
 )
 
 
-SUPPORTED_CONDITIONS = (
-    'no_update',
-    'correct_support',
-    'wrong_task_support',
-    'shuffled_actions',
-    'shuffled_time',
-    'observations_only',
-    'actions_only',
-    'duplicated_support',
-    'random_update_matched_norm',
-)
-
-
 def _write_json(path: Path, value: Any) -> None:
     with path.open('w', encoding='utf-8') as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
         handle.write('\n')
+
+
+def _task_success_rate(record: Dict[str, Any]) -> float:
+    rollouts = record['rollouts']
+    return float(np.mean([float(rollout['success']) for rollout in rollouts]))
+
+
+def _task_final_distance(record: Dict[str, Any]) -> float:
+    return float(
+        np.mean([float(rollout['final_distance']) for rollout in record['rollouts']])
+    )
+
+
+def _paired_gain_summary(
+    records: list[Dict[str, Any]],
+    baseline_records: list[Dict[str, Any]],
+    *,
+    seed: int,
+) -> Dict[str, Any]:
+    if len(records) != len(baseline_records):
+        raise ValueError('Paired Gate 3 records must contain the same tasks.')
+    task_ids = [int(record['task_id']) for record in records]
+    baseline_task_ids = [int(record['task_id']) for record in baseline_records]
+    if task_ids != baseline_task_ids:
+        raise ValueError('Paired Gate 3 records are not aligned by task ID.')
+
+    values = {
+        'success_rate': np.asarray(
+            [
+                _task_success_rate(record) - _task_success_rate(baseline)
+                for record, baseline in zip(records, baseline_records)
+            ]
+        ),
+        'offline_loss_reduction': np.asarray(
+            [
+                float(baseline['offline_loss']) - float(record['offline_loss'])
+                for record, baseline in zip(records, baseline_records)
+            ]
+        ),
+        'final_distance_reduction': np.asarray(
+            [
+                _task_final_distance(baseline) - _task_final_distance(record)
+                for record, baseline in zip(records, baseline_records)
+            ]
+        ),
+    }
+    summary: Dict[str, Any] = {'task_count': len(records)}
+    for metric_index, (name, metric_values) in enumerate(values.items()):
+        mean, low, high = bootstrap_mean_confidence_interval(
+            metric_values,
+            seed=int(seed) + metric_index,
+        )
+        summary[name] = {
+            'mean': mean,
+            'ci95': [low, high],
+            'per_task': metric_values.tolist(),
+        }
+    return summary
 
 
 def evaluate_ttt_state(cfg: ConfigDict) -> Path:
@@ -186,7 +233,7 @@ def evaluate_ttt_state(cfg: ConfigDict) -> Path:
             )
 
     aggregate: Dict[str, Any] = {}
-    for count_key, condition_records in results.items():
+    for support_index, (count_key, condition_records) in enumerate(results.items()):
         aggregate[count_key] = {}
         for condition, records in condition_records.items():
             rollouts = [rollout for record in records for rollout in record['rollouts']]
@@ -213,12 +260,29 @@ def evaluate_ttt_state(cfg: ConfigDict) -> Path:
         if correct is not None and no_update is not None:
             aggregate[count_key]['correct_support_gain'] = {
                 'success_rate': correct['success_rate'] - no_update['success_rate'],
-                'offline_loss': no_update['mean_offline_loss'] - correct['mean_offline_loss'],
+                'offline_loss': (
+                    no_update['mean_offline_loss'] - correct['mean_offline_loss']
+                ),
             }
         if correct is not None and wrong is not None:
             aggregate[count_key]['correct_vs_wrong_gap'] = {
                 'success_rate': correct['success_rate'] - wrong['success_rate'],
-                'offline_loss': wrong['mean_offline_loss'] - correct['mean_offline_loss'],
+                'offline_loss': (
+                    wrong['mean_offline_loss'] - correct['mean_offline_loss']
+                ),
+            }
+        baseline_records = condition_records.get('no_update')
+        if baseline_records is not None:
+            aggregate[count_key]['paired_gain_over_no_update'] = {
+                condition: _paired_gain_summary(
+                    records,
+                    baseline_records,
+                    seed=int(cfg.seed) + support_index * 100 + condition_index,
+                )
+                for condition_index, (condition, records) in enumerate(
+                    condition_records.items()
+                )
+                if condition != 'no_update'
             }
 
     checkpoint_name = Path(cfg.checkpoint_path).stem
@@ -235,6 +299,8 @@ def evaluate_ttt_state(cfg: ConfigDict) -> Path:
         'normalizer_id': normalizer.identifier,
         'reset_policy': 'reset_to_w0_for_each_task_and_condition',
         'query_fast_state_policy': 'frozen_after_support',
+        'paired_inference_unit': 'held_out_task_latent',
+        'paired_ci_method': '10000-sample percentile bootstrap over task latents',
         'aggregate': aggregate,
         'per_task': per_task,
     }

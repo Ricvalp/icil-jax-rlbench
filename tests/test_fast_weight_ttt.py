@@ -207,6 +207,19 @@ def test_jit_and_eager_objectives_match_and_update_is_deterministic():
     )
 
 
+def test_full_second_order_is_finite_with_fully_padded_write_segment():
+    batch, model_cfg, adapt_cfg, params = _setup(first_order=False)
+    support = dict(batch['support'])
+    for name in ('observation', 'action', 'next_observation'):
+        support[name] = support[name].at[:, :, 2:].set(0.0)
+    support['write_mask'] = support['write_mask'].at[:, :, 2:].set(False)
+    batch = {**batch, 'support': support}
+
+    gradient = _gradient(params, batch, model_cfg, adapt_cfg)
+    for leaf in jax.tree_util.tree_leaves(gradient):
+        assert bool(jnp.all(jnp.isfinite(leaf)))
+
+
 def test_single_device_jit_and_pmap_steps_agree():
     if jax.local_device_count() != 1:
         pytest.skip('This comparison intentionally isolates one-device pmap semantics.')

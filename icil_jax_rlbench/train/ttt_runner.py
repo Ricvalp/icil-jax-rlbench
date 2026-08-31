@@ -26,7 +26,6 @@ from icil_jax_rlbench.data.hidden_goal import (
 )
 from icil_jax_rlbench.models.fast_weight_ttt import (
     FastWeightTTTConfig,
-    TTTAdaptConfig,
     adapt_fast_state,
     fast_state_effective_rank,
     init_fast_weight_ttt_params,
@@ -39,12 +38,15 @@ from icil_jax_rlbench.train.provenance import (
     write_experiment_ledger,
 )
 from icil_jax_rlbench.train.ttt_step import (
-    TTTStepConfig,
     TTTTrainState,
     create_ttt_train_state,
     create_ttt_train_step,
     ttt_meta_objective,
     write_query_gradient_alignment,
+)
+from icil_jax_rlbench.train.ttt_config import (
+    adaptation_config_from,
+    step_config_from,
 )
 
 
@@ -79,27 +81,6 @@ def fast_weight_config_from(
         translation_loss_weight=float(cfg.action.translation_loss_weight),
         gripper_loss_weight=float(cfg.action.gripper_loss_weight),
         translation_huber_delta=float(cfg.action.translation_huber_delta),
-    )
-
-
-def adaptation_config_from(cfg: ConfigDict) -> TTTAdaptConfig:
-    return TTTAdaptConfig(
-        write_objective=str(cfg.adaptation.write_objective),
-        write_segment_size=int(cfg.adaptation.write_segment_size),
-        write_steps_per_segment=int(cfg.adaptation.write_steps_per_segment),
-        first_order=bool(cfg.adaptation.first_order),
-        fast_grad_clip_norm=float(cfg.adaptation.fast_grad_clip_norm),
-        fast_update_clip_norm=float(cfg.adaptation.fast_update_clip_norm),
-        fast_drift_weight=float(cfg.adaptation.fast_drift_weight),
-        write_enabled=bool(cfg.conditioning.fast_weight_write),
-        read_enabled=bool(cfg.conditioning.fast_weight_read),
-    )
-
-
-def step_config_from(cfg: ConfigDict) -> TTTStepConfig:
-    return TTTStepConfig(
-        slow_grad_clip_norm=float(cfg.train.slow_grad_clip_norm),
-        outer_fast_drift_weight=float(cfg.adaptation.outer_fast_drift_weight),
     )
 
 
