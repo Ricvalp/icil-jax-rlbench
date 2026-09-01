@@ -57,6 +57,8 @@ def get_config() -> ConfigDict:
     cfg.adaptation = ConfigDict()
     cfg.adaptation.write_objective = 'kvb'
     cfg.adaptation.read_objective = 'robotics_action_imitation'
+    cfg.adaptation.read_mode = 'absolute_gated'
+    cfg.adaptation.read_scale = 1.0
     cfg.adaptation.write_segment_size = 4
     cfg.adaptation.write_steps_per_segment = 1
     cfg.adaptation.first_order = False

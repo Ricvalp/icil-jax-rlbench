@@ -25,6 +25,7 @@ from icil_jax_rlbench.data.hidden_goal import (
     fit_state_normalizer,
 )
 from icil_jax_rlbench.models.fast_weight_ttt import (
+    READ_MODES,
     FastWeightTTTConfig,
     adapt_fast_state,
     fast_state_effective_rank,
@@ -102,6 +103,12 @@ def validate_adaptation_only_config(cfg: ConfigDict) -> None:
         raise ValueError('The controlled mechanism experiment disables query history.')
     if str(cfg.adaptation.read_objective) != 'robotics_action_imitation':
         raise ValueError('The initial READ objective must be robotics_action_imitation.')
+    read_mode = str(cfg.adaptation.get('read_mode', 'absolute_gated'))
+    if read_mode not in READ_MODES:
+        raise ValueError(f'adaptation.read_mode must be one of {READ_MODES}.')
+    read_scale = float(cfg.adaptation.get('read_scale', 1.0))
+    if not np.isfinite(read_scale) or read_scale <= 0.0:
+        raise ValueError('adaptation.read_scale must be finite and positive.')
     if str(cfg.action.translation_loss) != 'huber':
         raise ValueError('The controlled benchmark uses normalized Huber translation loss.')
     if str(cfg.action.gripper_loss) != 'binary_cross_entropy':
@@ -236,6 +243,8 @@ def _log_metrics(
             'improvement_ratio',
             'write_loss',
             'fast_delta_norm',
+            'read_delta_rms',
+            'prediction_delta_rms',
             'slow_grad_norm',
             'step_s',
         }

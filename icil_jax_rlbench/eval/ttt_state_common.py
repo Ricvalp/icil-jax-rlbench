@@ -38,6 +38,8 @@ def rollout(
     normalizer: StateNormalizer,
     model_cfg,
     read_enabled: bool,
+    read_mode: str = 'absolute_gated',
+    read_scale: float = 1.0,
 ) -> Dict[str, Any]:
     env = HiddenGoalEnvironment(benchmark_cfg, goal, int(episode_id))
     action_trace = []
@@ -49,6 +51,8 @@ def rollout(
             jnp.asarray(normalized_observation),
             model_cfg,
             read_enabled=bool(read_enabled),
+            read_mode=str(read_mode),
+            read_scale=float(read_scale),
         )
         action = np.asarray(jax.device_get(executable_action(prediction, model_cfg)))
         action_trace.append(action)

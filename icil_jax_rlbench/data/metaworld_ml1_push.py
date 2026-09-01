@@ -15,7 +15,7 @@ from icil_jax_rlbench.data.metaworld_hidden_goal import (
 )
 
 
-class ML1ReachTaskDataset(MetaWorldTaskDataset):
+class ML1PushTaskDataset(MetaWorldTaskDataset):
     def __init__(
         self,
         cache_root: str | Path,
@@ -26,19 +26,19 @@ class ML1ReachTaskDataset(MetaWorldTaskDataset):
     ) -> None:
         super().__init__(
             cache_root,
-            integration_name='metaworld_ml1_reach',
+            integration_name='metaworld_ml1_push',
             normalization=normalization,
             normalization_eps=normalization_eps,
             cache_prepared_episodes=cache_prepared_episodes,
         )
 
 
-ML1ReachTaskSampler = MetaWorldTaskSampler
+ML1PushTaskSampler = MetaWorldTaskSampler
 
 __all__ = [
     'SPLITS',
-    'ML1ReachTaskDataset',
-    'ML1ReachTaskSampler',
+    'ML1PushTaskDataset',
+    'ML1PushTaskSampler',
     'TaskSplit',
     'build_task_episode_split',
     'normalization_identifier',

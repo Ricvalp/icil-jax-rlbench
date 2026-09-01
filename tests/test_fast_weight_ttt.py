@@ -86,6 +86,68 @@ def test_prediction_api_structurally_forbids_direct_support_and_query_actions():
     assert tuple(signature.parameters)[:3] == ('params', 'fast_state', 'observation')
 
 
+def test_delta_read_is_exact_query_only_noop_at_initial_fast_state():
+    batch, model_cfg, _, params = _setup()
+    query = _one_task(batch['query'])
+    observation = query['observation'][0, 0]
+    read_projection = dict(params['read_projection'])
+    read_projection['bias'] = jnp.linspace(
+        -0.5, 0.5, model_cfg.hidden_dim, dtype=jnp.float32
+    )
+    params = {**params, 'read_projection': read_projection}
+    initial = initial_fast_state(params)
+
+    query_only = predict_action(
+        params, initial, observation, model_cfg, read_enabled=False
+    )
+    delta_read = predict_action(
+        params,
+        initial,
+        observation,
+        model_cfg,
+        read_mode='delta',
+        read_scale=1.0,
+    )
+    np.testing.assert_array_equal(np.asarray(query_only), np.asarray(delta_read))
+
+
+def test_delta_read_repairs_zero_gate_support_bc_adaptation():
+    batch, model_cfg, _, params = _setup()
+    params = {**params, 'read_gate': jnp.zeros_like(params['read_gate'])}
+    support = _one_task(batch['support'])
+    initial = initial_fast_state(params)
+    legacy_cfg = TTTAdaptConfig(
+        write_objective='action_bc',
+        write_segment_size=2,
+        read_mode='absolute_gated',
+    )
+    repaired_cfg = TTTAdaptConfig(
+        write_objective='action_bc',
+        write_segment_size=2,
+        read_mode='delta',
+    )
+
+    legacy_state, _ = adapt_fast_state(params, support, model_cfg, legacy_cfg)
+    repaired_state, _ = adapt_fast_state(params, support, model_cfg, repaired_cfg)
+    assert float(tree_difference_norm(initial, legacy_state)) == 0.0
+    assert float(tree_difference_norm(initial, repaired_state)) > 1e-8
+
+
+def test_full_second_order_support_bc_delta_read_has_meta_gradient_paths():
+    batch, model_cfg, _, params = _setup(first_order=False)
+    params = {**params, 'read_gate': jnp.zeros_like(params['read_gate'])}
+    adapt_cfg = TTTAdaptConfig(
+        write_objective='action_bc',
+        write_segment_size=2,
+        read_mode='delta',
+        first_order=False,
+    )
+    gradient = _gradient(params, batch, model_cfg, adapt_cfg)
+    for name in ('query_projection', 'inner_lr_raw', 'read_projection'):
+        assert float(tree_l2_norm(gradient[name])) > 1e-12, name
+    assert float(tree_l2_norm(gradient['read_gate'])) == 0.0
+
+
 def test_fast_state_reset_carry_and_no_direct_support_bypass():
     batch, model_cfg, adapt_cfg, params = _setup()
     support = _one_task(batch['support'])

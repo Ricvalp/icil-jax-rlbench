@@ -55,6 +55,8 @@ def policy_actions(
     model_cfg: FastWeightTTTConfig,
     *,
     read_enabled: bool,
+    read_mode: str = 'absolute_gated',
+    read_scale: float = 1.0,
 ) -> np.ndarray:
     prediction = predict_action(
         params,
@@ -62,6 +64,8 @@ def policy_actions(
         jnp.asarray(normalized_observations),
         model_cfg,
         read_enabled=bool(read_enabled),
+        read_mode=str(read_mode),
+        read_scale=float(read_scale),
     )
     actions = executable_action(prediction, model_cfg)
     return np.asarray(jax.device_get(actions), dtype=np.float32)
@@ -77,6 +81,8 @@ def capture_rollout(
     normalizer: StateNormalizer,
     model_cfg: FastWeightTTTConfig,
     read_enabled: bool,
+    read_mode: str = 'absolute_gated',
+    read_scale: float = 1.0,
 ) -> StateRolloutTrace:
     env = HiddenGoalEnvironment(benchmark_cfg, goal, int(episode_id))
     observations = [env.observation()]
@@ -89,6 +95,8 @@ def capture_rollout(
             normalized,
             model_cfg,
             read_enabled=read_enabled,
+            read_mode=read_mode,
+            read_scale=read_scale,
         )
         next_observation, done = env.step(action)
         actions.append(action)
@@ -136,6 +144,8 @@ def planar_vector_field(
     grid_size: int,
     phase: float,
     read_enabled: bool,
+    read_mode: str = 'absolute_gated',
+    read_scale: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     coordinates = np.linspace(
         -float(world_limit), float(world_limit), int(grid_size), dtype=np.float32
@@ -157,6 +167,8 @@ def planar_vector_field(
         normalized,
         model_cfg,
         read_enabled=read_enabled,
+        read_mode=read_mode,
+        read_scale=read_scale,
     )
     field_x = actions[:, 0].reshape(grid_x.shape)
     field_y = actions[:, 1].reshape(grid_y.shape)

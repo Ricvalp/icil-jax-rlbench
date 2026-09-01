@@ -17,7 +17,10 @@ from icil_jax_rlbench.models.fast_weight_ttt import (
 )
 
 
-@partial(jax.jit, static_argnames=('model_cfg', 'read_enabled'))
+@partial(
+    jax.jit,
+    static_argnames=('model_cfg', 'read_enabled', 'read_mode', 'read_scale'),
+)
 def _predict_normalized_action(
     params: Mapping[str, Any],
     fast_state: Any,
@@ -25,6 +28,8 @@ def _predict_normalized_action(
     *,
     model_cfg: FastWeightTTTConfig,
     read_enabled: bool,
+    read_mode: str,
+    read_scale: float,
 ) -> jax.Array:
     return predict_action(
         params,
@@ -32,10 +37,12 @@ def _predict_normalized_action(
         observation,
         model_cfg,
         read_enabled=bool(read_enabled),
+        read_mode=str(read_mode),
+        read_scale=float(read_scale),
     )
 
 
-class ML1ReachJaxPolicy:
+class MetaWorldJaxPolicy:
     """Expose a frozen JAX query policy to the public phi policy interface."""
 
     def __init__(
@@ -47,6 +54,8 @@ class ML1ReachJaxPolicy:
         normalization: StandardNormalization,
         fast_state: Any | None = None,
         read_enabled: bool = False,
+        read_mode: str = 'absolute_gated',
+        read_scale: float = 1.0,
     ) -> None:
         self.integration = integration
         self.params = jax.tree_util.tree_map(jnp.asarray, params)
@@ -57,6 +66,8 @@ class ML1ReachJaxPolicy:
             initial_fast_state(self.params) if fast_state is None else fast_state,
         )
         self.read_enabled = bool(read_enabled)
+        self.read_mode = str(read_mode)
+        self.read_scale = float(read_scale)
 
     def reset(self, *, integration, seed: int) -> None:
         del seed
@@ -65,9 +76,11 @@ class ML1ReachJaxPolicy:
 
     def predict(self, inputs: PolicyInput) -> np.ndarray:
         if inputs.integration != self.integration.spec:
-            raise ValueError('Policy input does not match the bound ML1 Reach task.')
+            raise ValueError('Policy input does not match the bound MetaWorld task.')
         if set(inputs.observations) != {'state'}:
-            raise ValueError("ML1 Reach policy expects exactly the 'state' observation.")
+            raise ValueError(
+                "MetaWorld policy expects exactly the 'state' observation."
+            )
         state = np.asarray(inputs.observations['state'], dtype=np.float32)
         if state.shape != (self.model_cfg.observation_dim,):
             raise ValueError(
@@ -80,6 +93,8 @@ class ML1ReachJaxPolicy:
             jnp.asarray(normalized_state),
             model_cfg=self.model_cfg,
             read_enabled=self.read_enabled,
+            read_mode=self.read_mode,
+            read_scale=self.read_scale,
         )
         action = self.normalization.denormalize_actions(
             np.asarray(jax.device_get(normalized_action))
@@ -90,4 +105,7 @@ class ML1ReachJaxPolicy:
         )
 
 
-__all__ = ['ML1ReachJaxPolicy']
+# Compatibility for existing Reach callers and checkpoints.
+ML1ReachJaxPolicy = MetaWorldJaxPolicy
+
+__all__ = ['ML1ReachJaxPolicy', 'MetaWorldJaxPolicy']

@@ -58,10 +58,11 @@ Do not interpret a passing Gate 2 as evidence of held-out adaptation.
 
 ## Directory Structure
 
-- `data/metaworld_ml1_reach.py`: task-aware phi cache, normalization, and
-  support/query samplers.
-- `train/metaworld_query_runner.py`: support-free ML1 Reach behavior cloning.
-- `eval/metaworld_ml1_reach_gate1.py`: ordinary-adaptation upper bound.
+- `data/metaworld_hidden_goal.py`: task-aware phi cache, normalization, and
+  support/query samplers shared by ML1 Reach and ML1 Push.
+- `train/metaworld_query_runner.py`: support-free MetaWorld behavior cloning.
+- `eval/metaworld_hidden_goal_gate1.py`: ordinary-adaptation upper bound.
+- `eval/metaworld_hidden_goal_ttt.py`: held-out fast-weight support controls.
 - `eval/metaworld_policy.py`: JAX implementation of the phi policy interface.
 - `data/hidden_goal.py`: controlled environment, task splits, normalization,
   samplers, and integrity checks.
@@ -77,12 +78,12 @@ Do not interpret a passing Gate 2 as evidence of held-out adaptation.
 
 ## Controlled Benchmark Contract
 
-The first scientific experiment uses the `phi_mujoco`
-`metaworld_ml1_reach` integration: 40/10/50 disjoint tasks, hidden goal slots,
-39D state, and 4D continuous action. Never pass task IDs or provenance goals to
-the model. Fit observation and action normalization only from training-task
-episodes. Support, offline query, and fresh closed-loop query starts must not
-overlap.
+The controlled scientific experiments use the `phi_mujoco`
+`metaworld_ml1_reach` and `metaworld_ml1_push` integrations: 40/10/50 disjoint
+tasks, hidden goal slots, 39D state, and 4D continuous action. Never pass task
+IDs or provenance goals to the model. Fit observation and action normalization
+only from training-task episodes. Support, offline query, and fresh closed-loop
+query starts must not overlap.
 
 The synthetic diagnostic has a 2D goal excluded from `[x, y, gripper, phase]`
 and a normalized planar-delta-plus-binary-gripper action. Its train,

@@ -4,8 +4,8 @@ This branch implements the adaptation-only fast-weight TTT program in
 `ICIL_TTT_IMPLEMENTATION_PLAN.md`. The former direct-regression pretraining,
 parameter-MAML, and memory-MAML paths have been removed deliberately.
 
-The first policy experiment uses hidden-goal MetaWorld ML1 Reach through the
-independent `phi-mujoco` interoperability layer. A self-contained synthetic
+The policy experiments use hidden-goal MetaWorld ML1 Reach, ML1 Push, and ML10 through
+the independent `phi-mujoco` interoperability layer. A self-contained synthetic
 hidden-goal benchmark remains available for fast mechanism and autodiff tests.
 End-to-end RLBench TTT remains gated on successful held-out-latent state
 experiments.
@@ -35,10 +35,10 @@ uv sync --group metaworld --extra wandb
 uv run --group metaworld pytest -q
 ```
 
-This installs the `metaworld_ml1_reach` data/evaluation adapter. ICIL owns the
-task-aware support/query sampler, train-task normalization, JAX policy,
-adaptation, and experimental controls; simulator and collection logic remains
-in `phi-mujoco`.
+This installs the `metaworld_ml1_reach`, `metaworld_ml1_push`, and `metaworld_ml10`
+data/evaluation adapters. ICIL owns the task-aware support/query sampler,
+train-task normalization, JAX policy, adaptation, and experimental controls;
+simulator and collection logic remains in `phi-mujoco`.
 
 On a CUDA 12 machine, add the JAX CUDA wheels:
 
@@ -46,9 +46,10 @@ On a CUDA 12 machine, add the JAX CUDA wheels:
 uv sync --group metaworld --extra cuda12 --extra wandb
 ```
 
-`uv sync` is exact: repeat `--extra cuda12` on every later sync of this
-environment, or `uv` will remove the optional CUDA plugin and JAX will fall
-back to CPU. Verify the backend with:
+`uv` environment sync is exact: repeat `--extra cuda12` on every later
+`uv sync` or `uv run` invocation that can synchronize this environment, or
+`uv` will remove the optional CUDA plugin and JAX will fall back to CPU. Verify
+the backend with:
 
 ```bash
 uv run --frozen python -c "import jax; print(jax.default_backend(), jax.devices())"
@@ -72,7 +73,10 @@ support, and then frozen while evaluating independent query episodes.
 
 ## Current Components
 
-- `phi-mujoco` ML1 Reach cache loading with declared 40/10/50 task splits.
+- `phi-mujoco` ML1 Reach and ML1 Push cache loading with declared 40/10/50
+  task splits.
+- Deconfounded ML10 loading with explicit family/instance hierarchy, confirmed
+  development holdouts, horizon bucketing, and untouched official test families.
 - Train-task-only observation and action normalization stored in checkpoints.
 - Query-only MetaWorld behavior cloning with 39D hidden-goal state and 4D
   continuous actions.
@@ -92,7 +96,7 @@ support, and then frozen while evaluating independent query episodes.
 - RLBench space-time supernodes and small event registers for the later visual
   phase.
 
-## Experiment Sequence
+## ML1 Reach Workflow
 
 Create a balanced ML1 Reach cache with `phi-mujoco`. This example collects 24
 independent demonstrations for each of the 100 declared tasks:
@@ -203,6 +207,199 @@ The matched training ablations are:
 icil_jax_rlbench/configs/metaworld_ml1_reach_fomaml.py
 icil_jax_rlbench/configs/metaworld_ml1_reach_action_bc.py
 ```
+
+## ML1 Push Workflow
+
+ML1 Push is the next controlled benchmark after Reach. The hidden task latent
+is the fixed planar target for the puck. The 39D policy observation contains
+the hand and puck state but its three goal slots are always zero. Every episode
+gets independently sampled hand and puck starts, so support and query episodes
+share only the target. The catalog uses 40 training targets, 10 validation
+targets, and the 50 official ML1 test targets.
+
+Collect and convert a balanced cache. As with Reach, 2,400 episodes gives 24
+successful demonstrations per target:
+
+```bash
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+raw="$PWD/datasets/raw/metaworld_ml1_push-$stamp"
+processed="$PWD/datasets/processed/metaworld_ml1_push-$stamp"
+
+uv run --frozen --group metaworld phi-mujoco collect metaworld_ml1_push \
+  --output-directory "$raw" \
+  --episodes 2400 \
+  --seed 0 \
+  --quiet --progress
+
+uv run --frozen --group metaworld phi-mujoco convert \
+  metaworld_ml1_push "$raw" \
+  --output-directory "$processed"
+
+uv run --frozen --group metaworld phi-mujoco validate-cache "$processed"
+export PHI_MUJOCO_ML1_PUSH_CACHE="$processed"
+```
+
+Train the support-free behavior-cloning policy and run the ordinary-adaptation
+upper bound on the 10 validation targets:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.train_metaworld_query_only \
+  --config=icil_jax_rlbench/configs/metaworld_ml1_push_query_only.py
+
+QUERY_CKPT=/absolute/path/to/outputs/metaworld_ml1_push_query_only/<run-id>/last.pkl
+
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.eval_metaworld_ml1_push_gate1 \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml1_push_gate1.py \
+  --config.checkpoint_path="$QUERY_CKPT"
+```
+
+Initialize KVB meta-training from that competent query-only policy, then run
+the matched held-out support controls:
+
+```bash
+export ICIL_ML1_PUSH_QUERY_CHECKPOINT="$QUERY_CKPT"
+
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.train_metaworld_ttt \
+  --config=icil_jax_rlbench/configs/metaworld_ml1_push_kvb.py
+
+TTT_CKPT=/absolute/path/to/outputs/metaworld_ml1_push_ttt/<run-id>/last.pkl
+
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.eval_metaworld_ml1_push_ttt \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml1_push_ttt.py \
+  --config.checkpoint_path="$TTT_CKPT"
+```
+
+Use validation for model and support-count choices. Run the untouched 50-target
+test split only after those choices are fixed by adding `--config.split=test`.
+The matched Push ablations are:
+
+```text
+icil_jax_rlbench/configs/metaworld_ml1_push_fomaml.py
+icil_jax_rlbench/configs/metaworld_ml1_push_action_bc.py
+```
+
+## ML10 Workflow
+
+ML10 is the first cross-task-family experiment. The development protocol trains
+on 40 native instances from each of eight official train families. Instances
+40--49 from those families form latent validation; all 50 `pick-place-v3` and
+`door-open-v3` instances form family validation. The five official ML10 test
+families remain untouched until settings are fixed. Family and instance IDs are
+cache metadata only and never enter the model.
+
+Collect eight successful demonstrations for every one of the 750 instances:
+
+```bash
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+raw="$PWD/datasets/raw/metaworld_ml10-$stamp"
+processed="$PWD/datasets/processed/metaworld_ml10-$stamp"
+
+uv run --frozen --group metaworld phi-mujoco collect metaworld_ml10 \
+  --output-directory "$raw" --episodes 6000 --seed 0 --quiet --progress
+uv run --frozen --group metaworld phi-mujoco convert metaworld_ml10 "$raw" \
+  --output-directory "$processed"
+uv run --frozen --group metaworld phi-mujoco validate-cache "$processed"
+export PHI_MUJOCO_ML10_CACHE="$processed"
+```
+
+Collection is balanced by construction and stores only successful rollouts.
+Each required family/instance/episode slot has a 100-attempt retry budget because
+some official scripted experts, especially `door-open-v3`, succeed only on a
+subset of the deconfounded episode starts.
+
+Train the development query-only policy and test the ordinary-adaptation upper
+bound on held-out families:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.train_metaworld_query_only \
+  --config=icil_jax_rlbench/configs/metaworld_ml10_query_only.py
+
+QUERY_CKPT=/absolute/path/to/outputs/metaworld_ml10_query_only/<run-id>/last.pkl
+
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.eval_metaworld_ml10_gate1 \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml10_gate1.py \
+  --config.checkpoint_path="$QUERY_CKPT"
+```
+
+Then train the original gated-READ full second-order KVB and its ablations:
+
+```bash
+export ICIL_ML10_QUERY_CHECKPOINT="$QUERY_CKPT"
+
+for config in metaworld_ml10_kvb metaworld_ml10_fomaml metaworld_ml10_action_bc; do
+  XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  uv run --frozen --group metaworld python \
+    -m icil_jax_rlbench.train_metaworld_ttt \
+    --config="icil_jax_rlbench/configs/${config}.py"
+done
+```
+
+The support-BC delta-READ experiment avoids the zero-gate collapse of the
+original action-BC path. Delta READ injects the projected difference between
+the adapted fast model and `W0`; it is therefore an exact query-only no-op at
+`W0` while retaining a nonzero derivative with respect to the fast state. Use
+the same READ parameterization for KVB and support-BC so the WRITE objectives
+remain matched:
+
+```bash
+export ICIL_ML10_QUERY_CHECKPOINT="$QUERY_CKPT"
+
+for config in metaworld_ml10_kvb_delta_read metaworld_ml10_action_bc_delta_read; do
+  XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  uv run --frozen --group metaworld python \
+    -m icil_jax_rlbench.train_metaworld_ttt \
+    --config="icil_jax_rlbench/configs/${config}.py"
+done
+```
+
+Small eager configs are available for stepping through either full
+second-order objective. They use one task, one support episode, one query
+episode, the first 32 temporal slots, and two outer steps. With the default
+segment size, each support batch contains two WRITE segments. These configs are
+for debugging, not measurements:
+
+```bash
+for config in metaworld_ml10_kvb_debug metaworld_ml10_action_bc_debug; do
+  XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  uv run --frozen --group metaworld python \
+    -m icil_jax_rlbench.train_metaworld_ttt \
+    --config="icil_jax_rlbench/configs/${config}.py"
+done
+```
+
+Evaluate a checkpoint on family validation. The default screen uses ten task
+instances and matched fresh rollout seeds; remove `max_tasks` for the complete
+100-instance validation run.
+
+```bash
+TTT_CKPT=/absolute/path/to/outputs/metaworld_ml10_ttt/<run-id>/last.pkl
+
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.eval_metaworld_ml10_ttt \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml10_ttt.py \
+  --config.checkpoint_path="$TTT_CKPT"
+```
+
+This evaluation distinguishes same-family wrong-instance support from support
+drawn from a different family. Videos remain isolated in the evaluation path;
+add `--config.record_video=True --config.save_rollout_artifacts=True`.
+
+After all settings are frozen, retrain query-only and KVB with
+`metaworld_ml10_query_only_final.py` and `metaworld_ml10_kvb_final.py`. Evaluate
+that final KVB checkpoint once with `--config.split=test --config.max_tasks=0`.
 
 The synthetic benchmark remains useful for Gate 2 and fast-weight
 implementation checks:
@@ -337,15 +534,17 @@ settings are taken from the resume command.
 
 ## Repository Layout
 
-- `icil_jax_rlbench/data/metaworld_ml1_reach.py`: task-aware phi cache and
-  support/query sampler.
+- `icil_jax_rlbench/data/metaworld_hidden_goal.py`: shared task-aware phi cache,
+  train-task normalization, and support/query sampler for Reach and Push.
+- `icil_jax_rlbench/data/metaworld_ml1_{reach,push}.py`: benchmark-specific
+  dataset entrypoints.
 - `icil_jax_rlbench/train/metaworld_query_runner.py`: query-only MetaWorld BC.
 - `icil_jax_rlbench/train/metaworld_ttt_runner.py`: MetaWorld KVB meta-training,
   exact resume, ledger, and checkpoints.
-- `icil_jax_rlbench/eval/metaworld_ml1_reach_gate1.py`: ordinary-adaptation
-  upper bound and closed-loop support controls.
-- `icil_jax_rlbench/eval/metaworld_ml1_reach_ttt.py`: held-out KVB support
-  controls and closed-loop evaluation.
+- `icil_jax_rlbench/eval/metaworld_hidden_goal_gate1.py`: ordinary-adaptation
+  upper bound and closed-loop controls shared by Reach and Push.
+- `icil_jax_rlbench/eval/metaworld_hidden_goal_ttt.py`: held-out KVB support
+  controls and closed-loop evaluation shared by Reach and Push.
 - `icil_jax_rlbench/eval/metaworld_policy.py`: phi policy-interface adapter.
 - `icil_jax_rlbench/eval/support_controls.py`: shared support perturbations and
   confidence intervals.

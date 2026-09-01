@@ -8,6 +8,7 @@ import jax.numpy as jnp
 
 
 PyTree = Any
+READ_MODES = ('absolute_gated', 'delta')
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,8 @@ class TTTAdaptConfig:
     fast_drift_weight: float = 0.0
     write_enabled: bool = True
     read_enabled: bool = True
+    read_mode: str = 'absolute_gated'
+    read_scale: float = 1.0
 
 
 def _linear_init(
@@ -203,6 +206,35 @@ def project_key_value(
     return key, value
 
 
+def fast_read_residual(
+    params: Mapping[str, PyTree],
+    fast_state: PyTree,
+    hidden: jax.Array,
+    cfg: FastWeightTTTConfig,
+    *,
+    read_enabled: bool = True,
+    read_mode: str = 'absolute_gated',
+    read_scale: float = 1.0,
+) -> jax.Array:
+    """Return the fast adapter residual injected into slow query features."""
+
+    if not bool(read_enabled):
+        return jnp.zeros_like(hidden)
+    query = _l2_normalize(
+        _linear(params['query_projection'], _layer_norm(hidden))
+    )
+    memory = fast_model_apply(fast_state, query, cfg)
+    if str(read_mode) == 'delta':
+        initial_memory = fast_model_apply(initial_fast_state(params), query, cfg)
+        adapted_read = _linear(params['read_projection'], memory)
+        initial_read = _linear(params['read_projection'], initial_memory)
+        return float(read_scale) * (adapted_read - initial_read)
+    elif str(read_mode) != 'absolute_gated':
+        raise ValueError(f'read_mode must be one of {READ_MODES}.')
+    read = _linear(params['read_projection'], memory)
+    return jnp.tanh(params['read_gate']) * read
+
+
 def read_fast_memory(
     params: Mapping[str, PyTree],
     fast_state: PyTree,
@@ -210,17 +242,20 @@ def read_fast_memory(
     cfg: FastWeightTTTConfig,
     *,
     read_enabled: bool = True,
+    read_mode: str = 'absolute_gated',
+    read_scale: float = 1.0,
 ) -> jax.Array:
-    """READ from fast weights and inject the gated residual into slow features."""
+    """READ from fast weights and inject a residual into slow features."""
 
-    if not bool(read_enabled):
-        return hidden
-    query = _l2_normalize(
-        _linear(params['query_projection'], _layer_norm(hidden))
+    return hidden + fast_read_residual(
+        params,
+        fast_state,
+        hidden,
+        cfg,
+        read_enabled=read_enabled,
+        read_mode=read_mode,
+        read_scale=read_scale,
     )
-    memory = fast_model_apply(fast_state, query, cfg)
-    read = _linear(params['read_projection'], memory)
-    return hidden + jnp.tanh(params['read_gate']) * read
 
 
 def predict_action(
@@ -230,6 +265,8 @@ def predict_action(
     cfg: FastWeightTTTConfig,
     *,
     read_enabled: bool = True,
+    read_mode: str = 'absolute_gated',
+    read_scale: float = 1.0,
 ) -> jax.Array:
     """Predict from query observation and fast state only.
 
@@ -239,7 +276,13 @@ def predict_action(
 
     hidden = _encode_query(params, observation)
     hidden = read_fast_memory(
-        params, fast_state, hidden, cfg, read_enabled=read_enabled
+        params,
+        fast_state,
+        hidden,
+        cfg,
+        read_enabled=read_enabled,
+        read_mode=read_mode,
+        read_scale=read_scale,
     )
     translation = _linear(params['translation_head'], hidden)
     if str(cfg.translation_output) == 'tanh':
@@ -395,6 +438,8 @@ def write_loss(
             segment['observation'],
             model_cfg,
             read_enabled=bool(adapt_cfg.read_enabled),
+            read_mode=str(adapt_cfg.read_mode),
+            read_scale=float(adapt_cfg.read_scale),
         )
         loss, _ = robotics_action_loss(
             prediction, segment['action'], mask, model_cfg
@@ -629,6 +674,8 @@ def query_imitation_loss(
         query['observation'],
         model_cfg,
         read_enabled=bool(adapt_cfg.read_enabled),
+        read_mode=str(adapt_cfg.read_mode),
+        read_scale=float(adapt_cfg.read_scale),
     )
     return robotics_action_loss(
         prediction,
@@ -636,6 +683,47 @@ def query_imitation_loss(
         query['outer_loss_mask'],
         model_cfg,
     )
+
+
+def query_adaptation_effect_metrics(
+    params: Mapping[str, PyTree],
+    initial_state: PyTree,
+    adapted_state: PyTree,
+    query: Mapping[str, jax.Array],
+    model_cfg: FastWeightTTTConfig,
+    adapt_cfg: TTTAdaptConfig,
+) -> Dict[str, jax.Array]:
+    """Measure how much a fast update changes READ features and predictions."""
+
+    hidden = _encode_query(params, query['observation'])
+    read_kwargs = {
+        'read_enabled': bool(adapt_cfg.read_enabled),
+        'read_mode': str(adapt_cfg.read_mode),
+        'read_scale': float(adapt_cfg.read_scale),
+    }
+    initial_read = fast_read_residual(
+        params, initial_state, hidden, model_cfg, **read_kwargs
+    )
+    adapted_read = fast_read_residual(
+        params, adapted_state, hidden, model_cfg, **read_kwargs
+    )
+    initial_prediction = predict_action(
+        params, initial_state, query['observation'], model_cfg, **read_kwargs
+    )
+    adapted_prediction = predict_action(
+        params, adapted_state, query['observation'], model_cfg, **read_kwargs
+    )
+    mask = query['outer_loss_mask']
+    return {
+        'read_delta_rms': jnp.sqrt(
+            _masked_mean(jnp.square(adapted_read - initial_read), mask)
+        ),
+        'prediction_delta_rms': jnp.sqrt(
+            _masked_mean(
+                jnp.square(adapted_prediction - initial_prediction), mask
+            )
+        ),
+    }
 
 
 def fast_state_effective_rank(fast_state: PyTree) -> jax.Array:

@@ -17,6 +17,8 @@ def adaptation_config_from(cfg: ConfigDict) -> TTTAdaptConfig:
         fast_drift_weight=float(cfg.adaptation.fast_drift_weight),
         write_enabled=bool(cfg.conditioning.fast_weight_write),
         read_enabled=bool(cfg.conditioning.fast_weight_read),
+        read_mode=str(cfg.adaptation.get('read_mode', 'absolute_gated')),
+        read_scale=float(cfg.adaptation.get('read_scale', 1.0)),
     )
 
 

@@ -25,6 +25,8 @@ def get_config() -> ConfigDict:
     cfg.adaptation = ConfigDict()
     cfg.adaptation.write_objective = 'kvb'
     cfg.adaptation.read_objective = 'robotics_action_imitation'
+    cfg.adaptation.read_mode = 'absolute_gated'
+    cfg.adaptation.read_scale = 1.0
     cfg.adaptation.write_segment_size = 16
     cfg.adaptation.write_steps_per_segment = 1
     cfg.adaptation.first_order = False
@@ -43,6 +45,8 @@ def get_config() -> ConfigDict:
     cfg.train.support_episodes_per_task = 2
     cfg.train.query_episodes_per_task = 2
     cfg.train.batch_size = 4
+    cfg.train.eager_debug = False
+    cfg.train.debug_max_time_steps = 0
     cfg.train.output_dir = os.path.join(
         os.environ.get('ICIL_JAX_RLBENCH_RUN_ROOT', 'outputs'),
         'metaworld_ml1_reach_ttt',

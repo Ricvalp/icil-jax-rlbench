@@ -6,7 +6,10 @@ from icil_jax_rlbench.train.metaworld_query_runner import (
 )
 
 _CONFIG = config_flags.DEFINE_config_file(
-    'config', None, 'ML1 Reach query-only behavior cloning config.', lock_config=False
+    'config',
+    None,
+    'MetaWorld hidden-goal query-only behavior cloning config.',
+    lock_config=False,
 )
 
 

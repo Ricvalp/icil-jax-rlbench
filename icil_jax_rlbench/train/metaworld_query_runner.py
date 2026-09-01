@@ -15,9 +15,10 @@ import numpy as np
 import optax
 from ml_collections import ConfigDict
 
-from icil_jax_rlbench.data.metaworld_ml1_reach import (
-    ML1ReachTaskDataset,
-    ML1ReachTaskSampler,
+from icil_jax_rlbench.data.metaworld_hidden_goal import (
+    MetaWorldTaskDataset,
+    MetaWorldTaskSampler,
+    benchmark_from_config,
 )
 from icil_jax_rlbench.models.fast_weight_ttt import (
     FastWeightTTTConfig,
@@ -40,25 +41,36 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def validate_metaworld_query_config(cfg: ConfigDict) -> None:
-    if str(cfg.mode) != 'metaworld_ml1_reach_query_only':
-        raise ValueError("Expected mode='metaworld_ml1_reach_query_only'.")
+    benchmark = benchmark_from_config(cfg)
+    if str(cfg.mode) != benchmark.query_mode:
+        raise ValueError(f'Expected mode={benchmark.query_mode!r}.')
     if not str(cfg.dataset.cache_root):
         raise ValueError(
             'dataset.cache_root is required. Point it at a processed phi-mujoco cache.'
         )
     if str(cfg.action.translation_loss) != 'huber':
-        raise ValueError('ML1 Reach uses Huber loss for Cartesian actions.')
+        raise ValueError(f'{benchmark.label} uses Huber loss for Cartesian actions.')
     if str(cfg.action.gripper_loss) != 'huber':
-        raise ValueError('ML1 Reach uses Huber loss for its continuous gripper action.')
+        raise ValueError(
+            f'{benchmark.label} uses Huber loss for its continuous gripper action.'
+        )
     if int(cfg.train.batch_size) < 1:
         raise ValueError('train.batch_size must be positive.')
     if int(cfg.train.query_episodes_per_task) < 1:
         raise ValueError('train.query_episodes_per_task must be positive.')
+    train_split = str(cfg.dataset.get('train_split', 'train'))
+    validation_split = str(cfg.dataset.get('validation_split', 'validation'))
+    if train_split == validation_split:
+        _LOGGER.warning(
+            'Training and monitoring use the same task split %r; this is intended '
+            'only for the frozen-hyperparameter final protocol.',
+            train_split,
+        )
 
 
 def metaworld_model_config_from(
     cfg: ConfigDict,
-    dataset: ML1ReachTaskDataset,
+    dataset: MetaWorldTaskDataset,
 ) -> FastWeightTTTConfig:
     return FastWeightTTTConfig(
         observation_dim=int(dataset.observation_dim),
@@ -116,10 +128,13 @@ def _maybe_wandb(cfg: ConfigDict):
     return wandb
 
 
-def _run_id(wandb_mod) -> str:
+def _run_id(wandb_mod, dataset: MetaWorldTaskDataset) -> str:
     if wandb_mod is not None and wandb_mod.run is not None:
         return str(wandb_mod.run.id)
-    return f'ml1_reach_query_only_{datetime.now(UTC).strftime("%Y%m%d-%H%M%S")}'
+    return (
+        f'{dataset.benchmark.slug}_query_only_'
+        f'{datetime.now(UTC).strftime("%Y%m%d-%H%M%S")}'
+    )
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -180,17 +195,21 @@ def _log_metrics(
 def _restore_state(
     checkpoint_path: str,
     optimizer,
-    dataset: ML1ReachTaskDataset,
+    dataset: MetaWorldTaskDataset,
     model_cfg: FastWeightTTTConfig,
 ):
     payload = load_checkpoint(checkpoint_path)
     extra = payload.get('extra', {})
-    if extra.get('checkpoint_type') != CHECKPOINT_TYPE:
-        raise ValueError('Resume checkpoint is not an ML1 Reach query-only checkpoint.')
+    if extra.get('checkpoint_type') != dataset.benchmark.query_mode:
+        raise ValueError(
+            f'Resume checkpoint is not a {dataset.benchmark.label} query-only checkpoint.'
+        )
     if extra.get('cache_data_sha256') != dataset.bundle.data_sha256:
         raise ValueError('Resume checkpoint was trained from a different processed cache.')
     if extra.get('normalizer_id') != dataset.normalization_id:
         raise ValueError('Resume checkpoint normalization differs from the current cache.')
+    if extra.get('dataset_protocol', dataset.protocol) != dataset.protocol:
+        raise ValueError('Resume checkpoint uses another task-split protocol.')
     if extra.get('model_config') != asdict(model_cfg):
         raise ValueError('Resume checkpoint model differs from the requested model config.')
     return create_ttt_train_state(
@@ -208,7 +227,7 @@ def _save_state(
     *,
     step: int,
     cfg: ConfigDict,
-    dataset: ML1ReachTaskDataset,
+    dataset: MetaWorldTaskDataset,
     model_cfg: FastWeightTTTConfig,
     provenance: Mapping[str, Any],
 ) -> None:
@@ -218,10 +237,16 @@ def _save_state(
         step=int(step),
         config=cfg,
         extra={
-            'checkpoint_type': CHECKPOINT_TYPE,
+            'checkpoint_type': dataset.benchmark.query_mode,
             'normalization': dataset.normalization.to_dict(),
             'normalizer_id': dataset.normalization_id,
             'cache_data_sha256': dataset.bundle.data_sha256,
+            'dataset_protocol': dataset.protocol,
+            'horizon_buckets': list(dataset.horizon_buckets),
+            'train_task_split': str(cfg.dataset.get('train_split', 'train')),
+            'validation_task_split': str(
+                cfg.dataset.get('validation_split', 'validation')
+            ),
             'model_config': asdict(model_cfg),
             'experiment_id': provenance['experiment_id'],
             'transient_fast_state_saved': False,
@@ -232,8 +257,12 @@ def _save_state(
 
 def train_metaworld_query_only(cfg: ConfigDict) -> Path:
     validate_metaworld_query_config(cfg)
-    dataset = ML1ReachTaskDataset(
+    benchmark = benchmark_from_config(cfg)
+    dataset = MetaWorldTaskDataset(
         str(cfg.dataset.cache_root),
+        integration_name=benchmark.integration_name,
+        protocol=str(cfg.dataset.get('protocol', 'default')),
+        horizon_buckets=tuple(cfg.dataset.get('horizon_buckets', ())),
         normalization_eps=float(cfg.dataset.normalization_eps),
         cache_prepared_episodes=bool(cfg.dataset.cache_prepared_episodes),
     )
@@ -258,8 +287,11 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
         checkpoint_normalization = checkpoint.get('extra', {}).get('normalization')
         if checkpoint_normalization is None:
             raise ValueError('Resume checkpoint does not contain normalization statistics.')
-        dataset = ML1ReachTaskDataset(
+        dataset = MetaWorldTaskDataset(
             str(cfg.dataset.cache_root),
+            integration_name=benchmark.integration_name,
+            protocol=str(cfg.dataset.get('protocol', 'default')),
+            horizon_buckets=tuple(cfg.dataset.get('horizon_buckets', ())),
             normalization=checkpoint_normalization,
             cache_prepared_episodes=bool(cfg.dataset.cache_prepared_episodes),
         )
@@ -272,15 +304,19 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
         model_cfg,
         slow_grad_clip_norm=float(cfg.train.slow_grad_clip_norm),
     )
-    train_sampler = ML1ReachTaskSampler(
-        dataset, split='train', seed=int(cfg.train.seed) + 1001
+    train_sampler = MetaWorldTaskSampler(
+        dataset,
+        split=str(cfg.dataset.get('train_split', 'train')),
+        seed=int(cfg.train.seed) + 1001,
     )
-    validation_sampler = ML1ReachTaskSampler(
-        dataset, split='validation', seed=int(cfg.train.seed) + 2001
+    validation_sampler = MetaWorldTaskSampler(
+        dataset,
+        split=str(cfg.dataset.get('validation_split', 'validation')),
+        seed=int(cfg.train.seed) + 2001,
     )
 
     wandb_mod = _maybe_wandb(cfg)
-    run_id = _run_id(wandb_mod)
+    run_id = _run_id(wandb_mod, dataset)
     run_dir = Path(cfg.train.output_dir).expanduser().resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     provenance = collect_experiment_provenance(
@@ -299,10 +335,10 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
         run_dir / 'task_splits.json',
         {
             split: list(dataset.task_ids(split))
-            for split in ('train', 'validation', 'test')
+            for split in dataset.benchmark.split_names
         },
     )
-    _LOGGER.info('ML1 Reach query-only run directory: %s', run_dir)
+    _LOGGER.info('%s query-only run directory: %s', benchmark.label, run_dir)
 
     start_step = int(jax.device_get(state.step))
     target_step = int(cfg.train.num_steps)
@@ -371,7 +407,9 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
             provenance=provenance,
         )
         _LOGGER.info(
-            'ML1 Reach query-only training complete: %s', run_dir / 'last.pkl'
+            '%s query-only training complete: %s',
+            benchmark.label,
+            run_dir / 'last.pkl',
         )
         return run_dir / 'last.pkl'
     finally:

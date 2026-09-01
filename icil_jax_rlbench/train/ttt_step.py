@@ -14,6 +14,7 @@ from icil_jax_rlbench.models.fast_weight_ttt import (
     adapt_fast_state,
     initial_fast_state,
     inner_learning_rates,
+    query_adaptation_effect_metrics,
     query_imitation_loss,
     tree_difference_norm,
     tree_l2_norm,
@@ -84,6 +85,14 @@ def _task_meta_objective(
         params, adapted, query, model_cfg, adapt_cfg
     )
     fast_delta = tree_difference_norm(adapted, fast_initial)
+    effect_metrics = query_adaptation_effect_metrics(
+        params,
+        fast_initial,
+        adapted,
+        query,
+        model_cfg,
+        adapt_cfg,
+    )
     objective = after
     if float(step_cfg.outer_fast_drift_weight) > 0.0:
         objective = objective + float(step_cfg.outer_fast_drift_weight) * jnp.square(
@@ -102,6 +111,7 @@ def _task_meta_objective(
         'fast_update_norm': jnp.mean(write_trace['fast_update_norm']),
         'fast_delta_norm': fast_delta,
         'fast_relative_delta_norm': fast_delta / (tree_l2_norm(fast_initial) + 1e-8),
+        **effect_metrics,
         'translation_loss_before': before_metrics['translation_loss'],
         'translation_loss_after': after_metrics['translation_loss'],
         'gripper_loss_before': before_metrics['gripper_loss'],
@@ -170,6 +180,7 @@ def create_ttt_train_step(
     step_cfg: TTTStepConfig,
     *,
     distributed: bool = False,
+    jit: bool = True,
 ) -> Callable[[TTTTrainState, Mapping[str, PyTree]], Tuple[TTTTrainState, Dict[str, jax.Array]]]:
     axis_name = 'devices'
 
@@ -213,8 +224,10 @@ def create_ttt_train_step(
         }
 
     if distributed:
+        if not bool(jit):
+            raise ValueError('Distributed TTT training requires jit=True.')
         return jax.pmap(train_step, axis_name=axis_name)
-    return jax.jit(train_step)
+    return jax.jit(train_step) if bool(jit) else train_step
 
 
 def write_query_gradient_alignment(

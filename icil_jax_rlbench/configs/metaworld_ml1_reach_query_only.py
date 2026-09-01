@@ -10,6 +10,7 @@ def get_config() -> ConfigDict:
     cfg.mode = 'metaworld_ml1_reach_query_only'
 
     cfg.dataset = ConfigDict()
+    cfg.dataset.integration = 'metaworld_ml1_reach'
     cfg.dataset.cache_root = os.environ.get('PHI_MUJOCO_ML1_REACH_CACHE', '')
     cfg.dataset.normalization_eps = 1e-4
     cfg.dataset.cache_prepared_episodes = True

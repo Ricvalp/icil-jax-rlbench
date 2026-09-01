@@ -226,6 +226,8 @@ def visualize_ttt_state(cfg: ConfigDict) -> Path:
                     normalizer=normalizer,
                     model_cfg=model_cfg,
                     read_enabled=bool(adapt_cfg.read_enabled),
+                    read_mode=str(adapt_cfg.read_mode),
+                    read_scale=float(adapt_cfg.read_scale),
                 )
                 for episode_id in query['episode_id']
             )
@@ -238,6 +240,8 @@ def visualize_ttt_state(cfg: ConfigDict) -> Path:
                 query['observation'],
                 model_cfg,
                 read_enabled=bool(adapt_cfg.read_enabled),
+                read_mode=str(adapt_cfg.read_mode),
+                read_scale=float(adapt_cfg.read_scale),
             )
             for condition in conditions
         }
@@ -254,6 +258,8 @@ def visualize_ttt_state(cfg: ConfigDict) -> Path:
                 grid_size=int(cfg.vector_field_grid_size),
                 phase=float(cfg.vector_field_phase),
                 read_enabled=bool(adapt_cfg.read_enabled),
+                read_mode=str(adapt_cfg.read_mode),
+                read_scale=float(adapt_cfg.read_scale),
             )
             if grid_x is None:
                 grid_x, grid_y = field_grid_x, field_grid_y

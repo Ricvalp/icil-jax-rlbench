@@ -7,6 +7,7 @@ from ml_collections import ConfigDict
 
 def get_config() -> ConfigDict:
     cfg = ConfigDict()
+    cfg.integration = 'metaworld_ml1_reach'
     cfg.checkpoint_path = ''
     cfg.cache_root = ''
     cfg.cache_prepared_episodes = True

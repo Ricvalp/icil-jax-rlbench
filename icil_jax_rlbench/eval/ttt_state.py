@@ -200,6 +200,8 @@ def evaluate_ttt_state(cfg: ConfigDict) -> Path:
                         normalizer=normalizer,
                         model_cfg=model_cfg,
                         read_enabled=bool(adapt_cfg.read_enabled),
+                        read_mode=str(adapt_cfg.read_mode),
+                        read_scale=float(adapt_cfg.read_scale),
                     )
                     for episode_id in query['episode_id']
                 ]

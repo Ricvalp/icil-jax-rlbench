@@ -18,6 +18,8 @@ SUPPORTED_CONDITIONS = (
     'no_update',
     'correct_support',
     'wrong_task_support',
+    'same_family_wrong_instance',
+    'different_family_support',
     'shuffled_actions',
     'shuffled_time',
     'observations_only',
@@ -54,9 +56,14 @@ def condition_support(
     which keeps variable-length MetaWorld batches comparable across conditions.
     """
 
-    source = wrong_support if condition == 'wrong_task_support' else correct_support
+    wrong_conditions = {
+        'wrong_task_support',
+        'same_family_wrong_instance',
+        'different_family_support',
+    }
+    source = wrong_support if condition in wrong_conditions else correct_support
     support = {name: np.array(value, copy=True) for name, value in source.items()}
-    if condition in ('no_update', 'correct_support', 'wrong_task_support'):
+    if condition in {'no_update', 'correct_support', *wrong_conditions}:
         return support
     if condition == 'shuffled_actions':
         _shuffle_valid(support, ('action',), rng)
