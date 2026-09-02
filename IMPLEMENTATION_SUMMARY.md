@@ -159,8 +159,11 @@ online evaluator because the plan requires Gate 3 first.
   checkpoint and processed cache. It retained all 4,192 fast-state coordinates
   without random projection.
 - The phi-mujoco ML45 audit validates all 50 reset contracts. Native tests pass
-  crossed support/query resets for all families and official expert collection
-  for all 50 families with bounded start retries.
+  crossed support/query resets for all families and audited expert collection
+  for all 50 families with bounded start retries. The wall-button family uses a
+  documented clearance correction, and disassemble restores a canonical nut
+  quaternion after an upstream double-reset artifact; both corrections are
+  validated over all native instances and recorded in cache provenance.
 - A real 2,400-episode query-only run and Gate 1 evaluation were completed;
   ordinary correct-support adaptation materially exceeded no update on the
   validation goals.
