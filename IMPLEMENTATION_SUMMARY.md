@@ -58,7 +58,14 @@ metadata. ML45 development uses 1,600 training tasks from 40 families, 400
 disjoint latent-validation instances, 250 tasks from five compositional family
 holdouts, and 250 untouched native-test tasks. Evaluation summaries include
 overall, per-family, and per-motion-phase aggregates; these labels never enter
-the policy.
+the main query-only or TTT policy.
+
+ML45 also has separate direct-conditioning capacity controls. One appends a
+50-way family one-hot to each state; the oracle control additionally appends
+the normalized task-latent reset fields declared by public `phi_mujoco` family
+contracts and a validity mask. These controls exclude opaque task identity and
+episode nuisance, use train-task-only latent normalization, have distinct
+checkpoint types, and cannot initialize the main KVB path.
 
 The standalone ML10 update-information diagnostic extracts full, unprojected
 first WRITE gradients, oracle query gradients, final fast deltas, functional

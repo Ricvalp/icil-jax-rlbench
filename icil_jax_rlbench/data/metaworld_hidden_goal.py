@@ -652,7 +652,7 @@ class MetaWorldTaskSampler:
         *,
         query_episodes: int,
         task_ids: Sequence[str] | None = None,
-    ) -> dict[str, dict[str, np.ndarray]]:
+    ) -> dict[str, Any]:
         query_episodes = int(query_episodes)
         if query_episodes < 1:
             raise ValueError('query_episodes must be positive.')
@@ -672,7 +672,10 @@ class MetaWorldTaskSampler:
             )
             for episode_indices in selections
         ]
-        return {'query': self._stack_tasks(query_tasks)}
+        return {
+            'query': self._stack_tasks(query_tasks),
+            'task_ids': selected_tasks,
+        }
 
 
 __all__ = [

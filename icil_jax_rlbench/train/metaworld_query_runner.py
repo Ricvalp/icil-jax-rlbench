@@ -15,6 +15,10 @@ import numpy as np
 import optax
 from ml_collections import ConfigDict
 
+from icil_jax_rlbench.data.metaworld_conditioning import (
+    CONDITIONING_MODES,
+    MetaWorldConditioning,
+)
 from icil_jax_rlbench.data.metaworld_hidden_goal import (
     MetaWorldTaskDataset,
     MetaWorldTaskSampler,
@@ -37,13 +41,58 @@ from icil_jax_rlbench.train.query_only_step import (
 from icil_jax_rlbench.train.ttt_step import create_ttt_train_state
 
 CHECKPOINT_TYPE = 'metaworld_ml1_reach_query_only'
+CONDITIONED_CHECKPOINT_TYPES = {
+    'family': 'metaworld_ml45_family_conditioned_query_only',
+    'family_task_latent': 'metaworld_ml45_oracle_conditioned_query_only',
+}
 _LOGGER = logging.getLogger(__name__)
+
+
+def _conditioning_mode(cfg: ConfigDict) -> str:
+    conditioning = cfg.get('conditioning')
+    if conditioning is None:
+        return 'none'
+    return str(conditioning.get('mode', 'none'))
+
+
+def query_checkpoint_type(cfg: ConfigDict) -> str:
+    benchmark = benchmark_from_config(cfg)
+    mode = _conditioning_mode(cfg)
+    if mode == 'none':
+        return benchmark.query_mode
+    try:
+        return CONDITIONED_CHECKPOINT_TYPES[mode]
+    except KeyError as exc:
+        choices = ('none', *CONDITIONING_MODES)
+        raise ValueError(f'conditioning.mode must be one of {choices}.') from exc
+
+
+def _conditioning_from_config(
+    cfg: ConfigDict,
+    dataset: MetaWorldTaskDataset,
+) -> MetaWorldConditioning | None:
+    mode = _conditioning_mode(cfg)
+    if mode == 'none':
+        return None
+    conditioning = cfg.conditioning
+    return MetaWorldConditioning.fit(
+        dataset,
+        mode=mode,
+        train_split=str(cfg.dataset.get('train_split', 'train')),
+        normalization_eps=float(conditioning.get('normalization_eps', 1e-4)),
+    )
 
 
 def validate_metaworld_query_config(cfg: ConfigDict) -> None:
     benchmark = benchmark_from_config(cfg)
-    if str(cfg.mode) != benchmark.query_mode:
-        raise ValueError(f'Expected mode={benchmark.query_mode!r}.')
+    checkpoint_type = query_checkpoint_type(cfg)
+    if str(cfg.mode) != checkpoint_type:
+        raise ValueError(f'Expected mode={checkpoint_type!r}.')
+    if (
+        _conditioning_mode(cfg) != 'none'
+        and benchmark.integration_name != 'metaworld_ml45'
+    ):
+        raise ValueError('Explicit task conditioning is currently defined for ML45.')
     if not str(cfg.dataset.cache_root):
         raise ValueError(
             'dataset.cache_root is required. Point it at a processed phi-mujoco cache.'
@@ -71,9 +120,15 @@ def validate_metaworld_query_config(cfg: ConfigDict) -> None:
 def metaworld_model_config_from(
     cfg: ConfigDict,
     dataset: MetaWorldTaskDataset,
+    *,
+    observation_dim: int | None = None,
 ) -> FastWeightTTTConfig:
     return FastWeightTTTConfig(
-        observation_dim=int(dataset.observation_dim),
+        observation_dim=(
+            int(dataset.observation_dim)
+            if observation_dim is None
+            else int(observation_dim)
+        ),
         action_dim=int(dataset.action_dim),
         translation_dim=3,
         hidden_dim=int(cfg.model.hidden_dim),
@@ -128,11 +183,20 @@ def _maybe_wandb(cfg: ConfigDict):
     return wandb
 
 
-def _run_id(wandb_mod, dataset: MetaWorldTaskDataset) -> str:
+def _run_id(
+    wandb_mod,
+    dataset: MetaWorldTaskDataset,
+    conditioning: MetaWorldConditioning | None,
+) -> str:
     if wandb_mod is not None and wandb_mod.run is not None:
         return str(wandb_mod.run.id)
+    label = (
+        'query_only'
+        if conditioning is None
+        else f'{conditioning.mode}_query_only'
+    )
     return (
-        f'{dataset.benchmark.slug}_query_only_'
+        f'{dataset.benchmark.slug}_{label}_'
         f'{datetime.now(UTC).strftime("%Y%m%d-%H%M%S")}'
     )
 
@@ -150,10 +214,22 @@ def _host_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
     }
 
 
-def _query_to_jax(query: Mapping[str, np.ndarray]) -> dict[str, jax.Array]:
+def _query_to_jax(
+    query: Mapping[str, np.ndarray],
+    *,
+    dataset: MetaWorldTaskDataset,
+    task_ids: tuple[str, ...],
+    conditioning: MetaWorldConditioning | None,
+) -> dict[str, jax.Array]:
+    observation = np.asarray(query['observation'])
+    if conditioning is not None:
+        observation = conditioning.augment_observations(
+            dataset, observation, task_ids
+        )
     return {
-        name: jnp.asarray(query[name])
-        for name in ('observation', 'action', 'outer_loss_mask')
+        'observation': jnp.asarray(observation),
+        'action': jnp.asarray(query['action']),
+        'outer_loss_mask': jnp.asarray(query['outer_loss_mask']),
     }
 
 
@@ -197,21 +273,33 @@ def _restore_state(
     optimizer,
     dataset: MetaWorldTaskDataset,
     model_cfg: FastWeightTTTConfig,
+    *,
+    checkpoint_type: str,
+    conditioning: MetaWorldConditioning | None,
 ):
     payload = load_checkpoint(checkpoint_path)
     extra = payload.get('extra', {})
-    if extra.get('checkpoint_type') != dataset.benchmark.query_mode:
+    if extra.get('checkpoint_type') != checkpoint_type:
         raise ValueError(
-            f'Resume checkpoint is not a {dataset.benchmark.label} query-only checkpoint.'
+            f'Resume checkpoint type differs from requested type {checkpoint_type!r}.'
         )
     if extra.get('cache_data_sha256') != dataset.bundle.data_sha256:
-        raise ValueError('Resume checkpoint was trained from a different processed cache.')
+        raise ValueError(
+            'Resume checkpoint was trained from a different processed cache.'
+        )
     if extra.get('normalizer_id') != dataset.normalization_id:
-        raise ValueError('Resume checkpoint normalization differs from the current cache.')
+        raise ValueError(
+            'Resume checkpoint normalization differs from the current cache.'
+        )
     if extra.get('dataset_protocol', dataset.protocol) != dataset.protocol:
         raise ValueError('Resume checkpoint uses another task-split protocol.')
     if extra.get('model_config') != asdict(model_cfg):
-        raise ValueError('Resume checkpoint model differs from the requested model config.')
+        raise ValueError(
+            'Resume checkpoint model differs from the requested model config.'
+        )
+    expected_conditioning = None if conditioning is None else conditioning.to_dict()
+    if extra.get('conditioning') != expected_conditioning:
+        raise ValueError('Resume checkpoint conditioning metadata differs.')
     return create_ttt_train_state(
         jax.tree_util.tree_map(jnp.asarray, payload['params']),
         optimizer,
@@ -230,6 +318,8 @@ def _save_state(
     dataset: MetaWorldTaskDataset,
     model_cfg: FastWeightTTTConfig,
     provenance: Mapping[str, Any],
+    checkpoint_type: str,
+    conditioning: MetaWorldConditioning | None,
 ) -> None:
     save_checkpoint(
         path,
@@ -237,7 +327,7 @@ def _save_state(
         step=int(step),
         config=cfg,
         extra={
-            'checkpoint_type': dataset.benchmark.query_mode,
+            'checkpoint_type': checkpoint_type,
             'normalization': dataset.normalization.to_dict(),
             'normalizer_id': dataset.normalization_id,
             'cache_data_sha256': dataset.bundle.data_sha256,
@@ -248,6 +338,9 @@ def _save_state(
                 cfg.dataset.get('validation_split', 'validation')
             ),
             'model_config': asdict(model_cfg),
+            'conditioning': (
+                None if conditioning is None else conditioning.to_dict()
+            ),
             'experiment_id': provenance['experiment_id'],
             'transient_fast_state_saved': False,
         },
@@ -274,7 +367,17 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
     if float(integrity['expert_success_rate']) != 1.0:
         raise RuntimeError('Cache contains unsuccessful expert episodes.')
 
-    model_cfg = metaworld_model_config_from(cfg, dataset)
+    conditioning = _conditioning_from_config(cfg, dataset)
+    checkpoint_type = query_checkpoint_type(cfg)
+    model_cfg = metaworld_model_config_from(
+        cfg,
+        dataset,
+        observation_dim=(
+            None
+            if conditioning is None
+            else dataset.observation_dim + conditioning.context_dim
+        ),
+    )
     params = init_fast_weight_ttt_params(
         jax.random.key(int(cfg.train.seed)), model_cfg
     )
@@ -286,7 +389,9 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
         checkpoint = load_checkpoint(str(cfg.train.resume_path))
         checkpoint_normalization = checkpoint.get('extra', {}).get('normalization')
         if checkpoint_normalization is None:
-            raise ValueError('Resume checkpoint does not contain normalization statistics.')
+            raise ValueError(
+                'Resume checkpoint does not contain normalization statistics.'
+            )
         dataset = MetaWorldTaskDataset(
             str(cfg.dataset.cache_root),
             integration_name=benchmark.integration_name,
@@ -295,8 +400,14 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
             normalization=checkpoint_normalization,
             cache_prepared_episodes=bool(cfg.dataset.cache_prepared_episodes),
         )
+        conditioning = _conditioning_from_config(cfg, dataset)
         state = _restore_state(
-            str(cfg.train.resume_path), optimizer, dataset, model_cfg
+            str(cfg.train.resume_path),
+            optimizer,
+            dataset,
+            model_cfg,
+            checkpoint_type=checkpoint_type,
+            conditioning=conditioning,
         )
 
     train_step = create_query_only_train_step(
@@ -316,20 +427,30 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
     )
 
     wandb_mod = _maybe_wandb(cfg)
-    run_id = _run_id(wandb_mod, dataset)
+    run_id = _run_id(wandb_mod, dataset, conditioning)
     run_dir = Path(cfg.train.output_dir).expanduser().resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    dataset_provenance = dataset.provenance()
+    dataset_provenance['policy_conditioning'] = (
+        None if conditioning is None else conditioning.to_dict()
+    )
     provenance = collect_experiment_provenance(
         repo_root=Path(__file__).resolve().parents[2],
         config=cfg,
         experiment_id=run_id,
-        dataset=dataset.provenance(),
+        dataset=dataset_provenance,
         parent_checkpoint=str(cfg.train.resume_path),
-        adaptation_mode='query_only_no_support',
+        adaptation_mode=(
+            'query_only_no_support'
+            if conditioning is None
+            else f'query_only_direct_{conditioning.mode}_conditioning'
+        ),
         reset_policy='not_applicable',
     )
     write_experiment_ledger(run_dir, config=cfg, provenance=provenance)
     _write_json(run_dir / 'normalization.json', dataset.normalization.to_dict())
+    if conditioning is not None:
+        _write_json(run_dir / 'conditioning.json', conditioning.to_dict())
     _write_json(run_dir / 'dataset_integrity.json', integrity)
     _write_json(
         run_dir / 'task_splits.json',
@@ -354,7 +475,12 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
                 int(cfg.train.batch_size),
                 query_episodes=int(cfg.train.query_episodes_per_task),
             )
-            query = _query_to_jax(batch['query'])
+            query = _query_to_jax(
+                batch['query'],
+                dataset=dataset,
+                task_ids=batch['task_ids'],
+                conditioning=conditioning,
+            )
             state, metrics = train_step(state, query)
             if step == start_step + 1:
                 jax.block_until_ready(metrics['loss'])
@@ -377,7 +503,12 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
                     )
                     _, validation_metrics = query_only_objective(
                         state.params,
-                        _query_to_jax(validation_batch['query']),
+                        _query_to_jax(
+                            validation_batch['query'],
+                            dataset=dataset,
+                            task_ids=validation_batch['task_ids'],
+                            conditioning=conditioning,
+                        ),
                         model_cfg,
                     )
                     values.append(_host_metrics(validation_metrics))
@@ -396,6 +527,8 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
                     dataset=dataset,
                     model_cfg=model_cfg,
                     provenance=provenance,
+                    checkpoint_type=checkpoint_type,
+                    conditioning=conditioning,
                 )
         _save_state(
             run_dir / 'last.pkl',
@@ -405,6 +538,8 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
             dataset=dataset,
             model_cfg=model_cfg,
             provenance=provenance,
+            checkpoint_type=checkpoint_type,
+            conditioning=conditioning,
         )
         _LOGGER.info(
             '%s query-only training complete: %s',
@@ -419,7 +554,9 @@ def train_metaworld_query_only(cfg: ConfigDict) -> Path:
 
 __all__ = [
     'CHECKPOINT_TYPE',
+    'CONDITIONED_CHECKPOINT_TYPES',
     'metaworld_model_config_from',
+    'query_checkpoint_type',
     'train_metaworld_query_only',
     'validate_metaworld_query_config',
 ]

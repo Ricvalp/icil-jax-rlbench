@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
+from phi_mujoco.integrations import family_contract
+
+from icil_jax_rlbench.configs.eval_metaworld_ml45_conditioned_query import (
+    get_config as get_conditioned_eval_config,
+)
 from icil_jax_rlbench.configs.eval_metaworld_ml45_ttt import (
     get_config as get_eval_config,
 )
@@ -12,14 +20,98 @@ from icil_jax_rlbench.configs.metaworld_ml45_fomaml import (
 from icil_jax_rlbench.configs.metaworld_ml45_kvb import (
     get_config as get_kvb_config,
 )
+from icil_jax_rlbench.configs.metaworld_ml45_family_conditioned_query_only import (
+    get_config as get_family_conditioned_config,
+)
+from icil_jax_rlbench.configs.metaworld_ml45_oracle_conditioned_query_only import (
+    get_config as get_oracle_conditioned_config,
+)
 from icil_jax_rlbench.configs.metaworld_ml45_query_only import (
     get_config as get_query_config,
 )
+from icil_jax_rlbench.data.metaworld_conditioning import MetaWorldConditioning
 from icil_jax_rlbench.data.metaworld_hidden_goal import (
     benchmark_for_integration,
     benchmark_from_config,
 )
 from icil_jax_rlbench.eval.metaworld_hidden_goal_ttt import _grouped_aggregate
+from icil_jax_rlbench.train.metaworld_query_runner import query_checkpoint_type
+
+
+def _reset_vector(
+    family: str,
+    task_latent: tuple[float, ...],
+    *,
+    nuisance: float,
+) -> tuple[float, ...]:
+    contract = family_contract(family)
+    assert contract.reset_vector_dim is not None
+    values = np.full((contract.reset_vector_dim,), nuisance, dtype=np.float32)
+    cursor = 0
+    for field in contract.reset_fields:
+        if field.role != 'task_latent':
+            continue
+        width = field.stop - field.start
+        values[field.start : field.stop] = task_latent[cursor : cursor + width]
+        cursor += width
+    assert cursor == len(task_latent)
+    return tuple(float(value) for value in values)
+
+
+class _ConditioningDataset:
+    integration_name = 'metaworld_ml45'
+    observation_dim = 39
+
+    def __init__(self) -> None:
+        self.descriptors = {
+            'reach-a': {
+                'family': 'reach-v3',
+                'native_rand_vec': _reset_vector(
+                    'reach-v3', (0.1, 0.7, 0.2), nuisance=-0.4
+                ),
+            },
+            'reach-b': {
+                'family': 'reach-v3',
+                'native_rand_vec': _reset_vector(
+                    'reach-v3', (0.1, 0.7, 0.2), nuisance=0.4
+                ),
+            },
+            'reach-c': {
+                'family': 'reach-v3',
+                'native_rand_vec': _reset_vector(
+                    'reach-v3', (0.2, 0.8, 0.3), nuisance=0.0
+                ),
+            },
+            'push-back-a': {
+                'family': 'push-back-v3',
+                'native_rand_vec': _reset_vector(
+                    'push-back-v3', (0.3, 0.6), nuisance=0.1
+                ),
+            },
+            'hammer-a': {
+                'family': 'hammer-v3',
+                'native_rand_vec': _reset_vector(
+                    'hammer-v3', (), nuisance=0.2
+                ),
+            },
+        }
+        tasks = tuple(
+            SimpleNamespace(family=value['family'])
+            for value in self.descriptors.values()
+        )
+        self.task_index = SimpleNamespace(
+            catalog=SimpleNamespace(tasks=tasks)
+        )
+
+    def task_ids(self, split: str) -> tuple[str, ...]:
+        assert split == 'train'
+        return tuple(self.descriptors)
+
+    def task_family(self, task_id: str) -> str:
+        return str(self.descriptors[task_id]['family'])
+
+    def task_descriptor(self, task_id: str) -> dict[str, object]:
+        return dict(self.descriptors[task_id])
 
 
 def test_ml45_benchmark_uses_the_shared_hidden_goal_policy_contract() -> None:
@@ -51,6 +143,61 @@ def test_ml45_query_and_main_kvb_configs_select_delta_read() -> None:
     assert kvb.adaptation.read_mode == 'delta'
     assert not kvb.adaptation.first_order
     assert kvb.train.num_steps == 100_000
+
+
+def test_ml45_conditioned_baseline_configs_are_separate_and_explicit() -> None:
+    family = get_family_conditioned_config()
+    oracle = get_oracle_conditioned_config()
+    evaluation = get_conditioned_eval_config()
+    assert family.conditioning.mode == 'family'
+    assert oracle.conditioning.mode == 'family_task_latent'
+    assert query_checkpoint_type(family) == family.mode
+    assert query_checkpoint_type(oracle) == oracle.mode
+    assert evaluation.split == 'latent_validation'
+    assert not evaluation.allow_unseen_families
+
+
+def test_ml45_oracle_conditioning_uses_only_declared_task_latents() -> None:
+    dataset = _ConditioningDataset()
+    family = MetaWorldConditioning.fit(dataset, mode='family')
+    oracle = MetaWorldConditioning.fit(dataset, mode='family_task_latent')
+
+    assert family.family_names == ('reach-v3', 'push-back-v3', 'hammer-v3')
+    assert family.context_dim == 3
+    assert oracle.latent_dim == 3
+    assert oracle.context_dim == 9
+    np.testing.assert_array_equal(
+        oracle.context(dataset, 'reach-a'),
+        oracle.context(dataset, 'reach-b'),
+    )
+    np.testing.assert_array_equal(
+        oracle.context(dataset, 'push-back-a')[-3:],
+        np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        oracle.context(dataset, 'hammer-a')[-3:],
+        np.zeros((3,), dtype=np.float32),
+    )
+    restored = MetaWorldConditioning.from_dict(oracle.to_dict())
+    restored.validate_dataset(dataset)
+    assert not oracle.to_dict()['contains_task_id']
+    assert not oracle.to_dict()['contains_episode_nuisance']
+
+
+def test_ml45_conditioning_broadcasts_over_demo_and_time_axes() -> None:
+    dataset = _ConditioningDataset()
+    conditioning = MetaWorldConditioning.fit(
+        dataset, mode='family_task_latent'
+    )
+    observations = np.zeros((2, 2, 4, 39), dtype=np.float32)
+    augmented = conditioning.augment_observations(
+        dataset, observations, ('reach-a', 'push-back-a')
+    )
+    assert augmented.shape == (2, 2, 4, 48)
+    np.testing.assert_array_equal(
+        augmented[0, 0, 0, 39:], augmented[0, 1, 3, 39:]
+    )
+    assert not np.array_equal(augmented[0, 0, 0, 39:], augmented[1, 0, 0, 39:])
 
 
 def test_ml45_ablation_and_evaluation_configs_remain_explicit() -> None:

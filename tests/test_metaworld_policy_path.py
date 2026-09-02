@@ -30,7 +30,10 @@ from icil_jax_rlbench.eval.metaworld_ml1_reach_gate1 import (
     _ordinary_adapt,
     _parameter_mask,
 )
-from icil_jax_rlbench.eval.metaworld_policy import ML1ReachJaxPolicy
+from icil_jax_rlbench.eval.metaworld_policy import (
+    ML1ReachJaxPolicy,
+    MetaWorldConditionedJaxPolicy,
+)
 from icil_jax_rlbench.eval.support_controls import condition_support
 from icil_jax_rlbench.models.fast_weight_ttt import (
     FastWeightTTTConfig,
@@ -283,6 +286,46 @@ def test_policy_adapter_denormalizes_and_projects_actions(processed_cache):
         atol=1e-6,
     )
     assert action.dtype == np.float32
+
+
+def test_conditioned_policy_appends_context_to_raw_simulator_state(processed_cache):
+    dataset = ML1ReachTaskDataset(processed_cache)
+    context = np.asarray([1.0, -0.5], dtype=np.float32)
+    model_cfg = FastWeightTTTConfig(
+        observation_dim=39 + context.size,
+        action_dim=4,
+        translation_dim=3,
+        hidden_dim=8,
+        fast_dim=4,
+        fast_hidden_dim=4,
+        translation_output='linear',
+        gripper_loss='huber',
+    )
+    params = jax.tree_util.tree_map(
+        jnp.zeros_like,
+        init_fast_weight_ttt_params(jax.random.key(10), model_cfg),
+    )
+    policy = MetaWorldConditionedJaxPolicy(
+        integration=_ProjectingIntegration(),
+        params=params,
+        model_cfg=model_cfg,
+        normalization=dataset.normalization,
+        context=context,
+    )
+    action = policy.predict(
+        PolicyInput(
+            observations={'state': np.zeros((39,), dtype=np.float32)},
+            episode_index=0,
+            step_index=0,
+            seed=123,
+            integration=SPEC,
+        )
+    )
+    np.testing.assert_allclose(
+        action,
+        np.asarray(dataset.normalization.action_mean, dtype=np.float32),
+        atol=1e-6,
+    )
 
 
 def test_policy_adapter_uses_one_frozen_adapted_fast_state(processed_cache):

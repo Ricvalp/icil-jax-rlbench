@@ -80,6 +80,8 @@ support, and then frozen while evaluating independent query episodes.
 - Train-task-only observation and action normalization stored in checkpoints.
 - Query-only MetaWorld behavior cloning with 39D hidden-goal state and 4D
   continuous actions.
+- Separate ML45 family-conditioned and family-plus-task-latent oracle behavior
+  cloning controls for policy-capacity diagnosis.
 - Ordinary support-BC Gate 1 adaptation and matched fresh closed-loop rollouts.
 - Full-second-order MetaWorld KVB meta-training initialized from the query-only
   policy, with matched FOMAML and support-BC WRITE configs.
@@ -462,6 +464,51 @@ uv run --frozen --group metaworld python \
   -m icil_jax_rlbench.train_metaworld_ttt \
   --config=icil_jax_rlbench/configs/metaworld_ml45_kvb.py
 ```
+
+Two direct-conditioning controls test whether the query policy can represent
+the expert behavior when task information is supplied explicitly. They are
+separate from the TTT path and their checkpoints cannot initialize KVB:
+
+```bash
+# Discrete family only: 39D state + 50D family one-hot.
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.train_metaworld_conditioned_query \
+  --config=icil_jax_rlbench/configs/metaworld_ml45_family_conditioned_query_only.py
+
+# Oracle control: state + family + normalized declared task latent + mask.
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.train_metaworld_conditioned_query \
+  --config=icil_jax_rlbench/configs/metaworld_ml45_oracle_conditioned_query_only.py
+```
+
+The oracle control reads only reset-vector fields that the public
+`phi_mujoco` family contract marks as `task_latent`. It excludes task IDs,
+instance indices, hashes, and episode nuisance. ML45 has at most three such
+continuous values, so the oracle model input is 95D: 39 state + 50 family + 3
+latent + 3 validity mask. Task-latent normalization is fitted on development
+training tasks only.
+
+Evaluate either conditioned checkpoint on unseen instances of the 40 training
+families:
+
+```bash
+CONDITIONED_CKPT=/absolute/path/to/conditioned_query_only/<run-id>/last.pkl
+
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.eval_metaworld_ml45_conditioned_query \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml45_conditioned_query.py \
+  --config.checkpoint_path="$CONDITIONED_CKPT"
+```
+
+Add `--config.max_tasks=3 --config.closed_loop_episodes=3
+--config.save_rollout_artifacts=True --config.record_video=True` for a small
+video run. The default `latent_validation` split is intentional. Evaluation on
+family holdouts is rejected unless `allow_unseen_families=True`, because their
+one-hot coordinates were never optimized and therefore do not provide a fair
+family-conditioned capacity control.
 
 Evaluate the compositional family holdouts with matched support controls:
 

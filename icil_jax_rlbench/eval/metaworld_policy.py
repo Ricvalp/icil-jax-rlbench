@@ -68,6 +68,23 @@ class MetaWorldJaxPolicy:
         self.read_enabled = bool(read_enabled)
         self.read_mode = str(read_mode)
         self.read_scale = float(read_scale)
+        self._validate_model_input_dimension()
+
+    @property
+    def raw_observation_dim(self) -> int:
+        return len(self.normalization.obs_mean)
+
+    def _validate_model_input_dimension(self) -> None:
+        if self.model_cfg.observation_dim != self.raw_observation_dim:
+            raise ValueError(
+                'Unconditioned policy model input must match the raw observation '
+                'dimension.'
+            )
+
+    def _model_observation(self, state: np.ndarray) -> np.ndarray:
+        return np.asarray(
+            self.normalization.normalize_observations(state), dtype=np.float32
+        )
 
     def reset(self, *, integration, seed: int) -> None:
         del seed
@@ -82,15 +99,16 @@ class MetaWorldJaxPolicy:
                 "MetaWorld policy expects exactly the 'state' observation."
             )
         state = np.asarray(inputs.observations['state'], dtype=np.float32)
-        if state.shape != (self.model_cfg.observation_dim,):
+        if state.shape != (self.raw_observation_dim,):
             raise ValueError(
-                f'Expected state shape {(self.model_cfg.observation_dim,)}, got {state.shape}.'
+                f'Expected state shape {(self.raw_observation_dim,)}, got '
+                f'{state.shape}.'
             )
-        normalized_state = self.normalization.normalize_observations(state)
+        model_observation = self._model_observation(state)
         normalized_action = _predict_normalized_action(
             self.params,
             self.fast_state,
-            jnp.asarray(normalized_state),
+            jnp.asarray(model_observation),
             model_cfg=self.model_cfg,
             read_enabled=self.read_enabled,
             read_mode=self.read_mode,
@@ -105,7 +123,34 @@ class MetaWorldJaxPolicy:
         )
 
 
+class MetaWorldConditionedJaxPolicy(MetaWorldJaxPolicy):
+    """A query policy with one explicit context fixed for the whole rollout."""
+
+    def __init__(self, *, context: np.ndarray, **kwargs) -> None:
+        value = np.asarray(context, dtype=np.float32)
+        if value.ndim != 1 or not np.all(np.isfinite(value)):
+            raise ValueError('Policy context must be a finite one-dimensional array.')
+        self.context = value
+        super().__init__(**kwargs)
+
+    def _validate_model_input_dimension(self) -> None:
+        expected = self.raw_observation_dim + self.context.size
+        if self.model_cfg.observation_dim != expected:
+            raise ValueError(
+                f'Conditioned model expects input dimension {expected}, got '
+                f'{self.model_cfg.observation_dim}.'
+            )
+
+    def _model_observation(self, state: np.ndarray) -> np.ndarray:
+        normalized_state = super()._model_observation(state)
+        return np.concatenate((normalized_state, self.context), axis=0)
+
+
 # Compatibility for existing Reach callers and checkpoints.
 ML1ReachJaxPolicy = MetaWorldJaxPolicy
 
-__all__ = ['ML1ReachJaxPolicy', 'MetaWorldJaxPolicy']
+__all__ = [
+    'ML1ReachJaxPolicy',
+    'MetaWorldConditionedJaxPolicy',
+    'MetaWorldJaxPolicy',
+]
