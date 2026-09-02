@@ -163,7 +163,9 @@ online evaluator because the plan requires Gate 3 first.
   for all 50 families with bounded start retries. The wall-button family uses a
   documented clearance correction, and disassemble restores a canonical nut
   quaternion after an upstream double-reset artifact; both corrections are
-  validated over all native instances and recorded in cache provenance.
+  validated over all native instances. Stick-pull also uses an audited terminal
+  pull correction for a brittle upstream success-boundary offset. All controller
+  and reset corrections are recorded in cache provenance.
 - A real 2,400-episode query-only run and Gate 1 evaluation were completed;
   ordinary correct-support adaptation materially exceeded no update on the
   validation goals.
