@@ -7,6 +7,7 @@ from ml_collections import ConfigDict
 
 def get_config():
     cfg = ConfigDict()
+    cfg.integration = 'metaworld_ml10'
     cfg.checkpoint_path = ''
     cfg.cache_root = os.environ.get('PHI_MUJOCO_ML10_CACHE', '')
     cfg.output_dir = os.path.join(
@@ -33,8 +34,25 @@ def get_config():
     cfg.ridge = 1e-2
     cfg.cache_prepared_episodes = True
     cfg.progress_every = 20
+    cfg.visualization = ConfigDict()
+    cfg.visualization.enabled = False
+    cfg.visualization.condition = 'correct_support'
+    cfg.visualization.support_count = 2
+    cfg.visualization.representations = (
+        'first_write_gradient',
+        'final_fast_delta',
+        'read_action_delta',
+    )
+    cfg.visualization.splits = (
+        'train',
+        'latent_validation',
+        'family_validation',
+    )
+    cfg.visualization.pca_components = 50
+    cfg.visualization.perplexities = (30.0, 80.0)
+    cfg.visualization.max_iter = 1_000
+    cfg.visualization.seed = 0
     return cfg
 
 
 __all__ = ['get_config']
-

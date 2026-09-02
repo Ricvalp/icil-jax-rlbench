@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 from ml_collections import ConfigDict
-from phi_mujoco.integrations import family_contract
+from phi_mujoco.integrations import family_composition, family_contract
 
 from icil_jax_rlbench.data.metaworld_hidden_goal import (
     MetaWorldTaskDataset,
@@ -477,7 +477,10 @@ def _probe_summary(
 
 
 def _condition_summary(
-    rows: Sequence[Mapping[str, Any]], features: Mapping[str, np.ndarray]
+    rows: Sequence[Mapping[str, Any]],
+    features: Mapping[str, np.ndarray],
+    *,
+    target_split: str | None = None,
 ) -> dict[str, Any]:
     index = {
         (
@@ -488,6 +491,7 @@ def _condition_summary(
             row['condition'],
         ): position
         for position, row in enumerate(rows)
+        if target_split is None or row['target_split'] == target_split
     }
     conditions = sorted({str(row['condition']) for row in rows} - {'correct_support'})
     result: dict[str, Any] = {}
@@ -559,8 +563,9 @@ def _scalar_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, float]:
 
 
 def _render_report(summary: Mapping[str, Any]) -> str:
+    benchmark_label = str(summary['benchmark_label'])
     lines = [
-        '# MetaWorld ML10 Update-Information Diagnostic',
+        f'# MetaWorld {benchmark_label} Update-Information Diagnostic',
         '',
         f"- Checkpoint: `{summary['checkpoint_path']}`",
         f"- WRITE objective: `{summary['write_objective']}`",
@@ -570,8 +575,9 @@ def _render_report(summary: Mapping[str, Any]) -> str:
         '## Interpretation',
         '',
         (
-            'Family accuracy measures whether a frozen linear probe can recover the familiar '
-            'ML10 family on disjoint latent-validation instances. Latent regression measures '
+            'Family accuracy measures whether a frozen linear probe can recover the '
+            f'familiar {benchmark_label} family on disjoint latent-validation instances. '
+            'Latent regression measures '
             'within-family native task-vector recovery; normalized RMSE below 1 beats a '
             'train-mean predictor. Raw support statistics are a non-privileged information '
             'upper bound. Oracle query gradients are saved for diagnosis only and are never '
@@ -609,6 +615,23 @@ def _render_report(summary: Mapping[str, Any]) -> str:
             f"{values['final_delta_cosine_to_correct']:.3f} | "
             f"{values['mean_query_gain']:.5f} | "
             f"{values['mean_query_gain_difference_from_correct']:.5f} |"
+        )
+    visualization = summary.get('visualization')
+    if isinstance(visualization, Mapping):
+        lines.extend(
+            [
+                '',
+                '## Update Embeddings',
+                '',
+                (
+                    'Interactive PCA+t-SNE views are in `tsne/`. The family view uses '
+                    'marker shape for split; the held-out view colors held-out families, '
+                    'shows familiar-family updates as gray context, and connects repeated '
+                    'support samples from the same task instance. Treat t-SNE as a local '
+                    'visualization, not evidence by itself; original-space nearest-neighbor '
+                    'and cosine measurements are in `tsne/manifest.json`.'
+                ),
+            ]
         )
     lines.extend(
         [
@@ -660,7 +683,7 @@ def _plot_probe_scores(summary: Mapping[str, Any], output_path: Path) -> None:
 
 
 def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
-    """Extract and probe the information represented by ML10 WRITE updates."""
+    """Extract and probe information represented by family-aware WRITE updates."""
 
     checkpoint_path = Path(str(cfg.checkpoint_path)).expanduser().resolve()
     if not checkpoint_path.is_file():
@@ -668,12 +691,22 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
     payload = load_checkpoint(checkpoint_path)
     train_cfg = ConfigDict(payload['config'])
     benchmark = benchmark_from_config(train_cfg)
-    if benchmark.integration_name != 'metaworld_ml10':
-        raise ValueError('The update-information diagnostic currently requires ML10.')
+    requested_integration = str(cfg.get('integration', ''))
+    if requested_integration and requested_integration != benchmark.integration_name:
+        raise ValueError(
+            f'Diagnostic config requests {requested_integration!r}, but checkpoint '
+            f'belongs to {benchmark.integration_name!r}.'
+        )
+    if not benchmark.family_aware:
+        raise ValueError(
+            'The update-information diagnostic requires a family-aware benchmark.'
+        )
     validate_metaworld_ttt_config(train_cfg)
     extra = payload.get('extra', {})
     if extra.get('checkpoint_type') != benchmark.ttt_mode:
-        raise ValueError('checkpoint_path is not an ML10 TTT checkpoint.')
+        raise ValueError(
+            f'checkpoint_path is not a {benchmark.label} TTT checkpoint.'
+        )
 
     conditions = tuple(str(value) for value in cfg.conditions)
     unknown = set(conditions) - set(_SUPPORTED_CONDITIONS)
@@ -691,12 +724,12 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
     cache_root = str(cfg.cache_root) or str(train_cfg.dataset.cache_root)
     normalization = extra.get('normalization')
     if not isinstance(normalization, Mapping):
-        raise ValueError('Checkpoint lacks normalization statistics.')
+        raise TypeError('Checkpoint lacks normalization statistics.')
     dataset = MetaWorldTaskDataset(
         cache_root,
-        integration_name='metaworld_ml10',
-        protocol=str(train_cfg.dataset.protocol),
-        horizon_buckets=tuple(train_cfg.dataset.horizon_buckets),
+        integration_name=benchmark.integration_name,
+        protocol=str(train_cfg.dataset.get('protocol', 'default')),
+        horizon_buckets=tuple(train_cfg.dataset.get('horizon_buckets', ())),
         normalization=normalization,
         cache_prepared_episodes=bool(cfg.cache_prepared_episodes),
     )
@@ -754,6 +787,8 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
         for split, task_ids in selected_by_split.items():
             sampler = samplers[split]
             for task_id in task_ids:
+                target_descriptor = dataset.task_descriptor(task_id)
+                target_composition = family_composition(dataset.task_family(task_id))
                 same_family_task = dataset.same_family_wrong_task(task_id, split)
                 different_family_task = dataset.different_family_task(task_id, split)
                 for sample_index in range(int(cfg.samples_per_task)):
@@ -819,12 +854,31 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
                         source_latent, source_mask = _task_latent(
                             dataset, source_task_id
                         )
+                        source_descriptor = dataset.task_descriptor(source_task_id)
                         row = {
                             'target_task_id': task_id,
                             'target_family': dataset.task_family(task_id),
                             'target_split': split,
                             'support_task_id': source_task_id,
                             'support_family': dataset.task_family(source_task_id),
+                            'target_instance_index': int(
+                                target_descriptor['instance_index']
+                            ),
+                            'support_instance_index': int(
+                                source_descriptor['instance_index']
+                            ),
+                            'target_motion_phases': list(target_composition.phases),
+                            'target_motion_signature': target_composition.signature,
+                            'target_terminal_phase': target_composition.phases[-1],
+                            'target_gripper_mode': target_composition.gripper,
+                            'target_manipulated_entity': (
+                                target_composition.manipulated_entity
+                            ),
+                            'target_relation': target_composition.target_relation,
+                            'target_structure': list(target_composition.structure),
+                            'target_ml45_development_role': (
+                                target_composition.ml45_development_role
+                            ),
                             'support_count': support_count,
                             'sample_index': sample_index,
                             'condition': condition,
@@ -866,7 +920,8 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
                     completed += 1
                     if completed % max(1, int(cfg.progress_every)) == 0:
                         _LOGGER.info(
-                            'ML10 information extraction %d/%d task-support samples',
+                            '%s information extraction %d/%d task-support samples',
+                            benchmark.label,
                             completed,
                             total_units,
                         )
@@ -885,6 +940,10 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
         **features,
         target_task_id=np.asarray([row['target_task_id'] for row in rows]),
         support_task_id=np.asarray([row['support_task_id'] for row in rows]),
+        target_family=np.asarray([row['target_family'] for row in rows]),
+        target_instance_index=np.asarray(
+            [row['target_instance_index'] for row in rows], dtype=np.int16
+        ),
         target_split=np.asarray([row['target_split'] for row in rows]),
         condition=np.asarray([row['condition'] for row in rows]),
         support_count=np.asarray([row['support_count'] for row in rows], dtype=np.int16),
@@ -899,6 +958,8 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
         ridge=float(cfg.ridge),
     )
     summary = {
+        'integration': benchmark.integration_name,
+        'benchmark_label': benchmark.label,
         'checkpoint_path': str(checkpoint_path),
         'checkpoint_step': int(payload['step']),
         'checkpoint_type': extra.get('checkpoint_type'),
@@ -920,15 +981,50 @@ def analyze_metaworld_update_information(cfg: ConfigDict) -> Path:
         'adaptation_config': asdict(adapt_cfg),
         'analysis_config': config_to_dict(cfg),
         'scalar_means': _scalar_summary(rows),
+        'scalar_means_by_split': {
+            split: _scalar_summary(
+                [row for row in rows if row['target_split'] == split]
+            )
+            for split in split_limits
+            if any(row['target_split'] == split for row in rows)
+        },
         'condition_comparisons': _condition_summary(rows, features),
+        'condition_comparisons_by_split': {
+            split: _condition_summary(rows, features, target_split=split)
+            for split in split_limits
+        },
         'probes': probes,
         'oracle_query_gradient_deployment_use': False,
         'random_projection_used': False,
     }
+    visualization_cfg = cfg.get('visualization')
+    if visualization_cfg is not None and bool(
+        visualization_cfg.get('enabled', False)
+    ):
+        from icil_jax_rlbench.visualization.metaworld_update_information import (
+            write_update_tsne_artifacts,
+        )
+
+        summary['visualization'] = write_update_tsne_artifacts(
+            rows,
+            features,
+            run_dir / 'tsne',
+            benchmark_label=benchmark.label,
+            condition=str(visualization_cfg.condition),
+            support_count=int(visualization_cfg.support_count),
+            representations=tuple(visualization_cfg.representations),
+            splits=tuple(visualization_cfg.splits),
+            pca_components=int(visualization_cfg.pca_components),
+            perplexities=tuple(visualization_cfg.perplexities),
+            max_iter=int(visualization_cfg.max_iter),
+            seed=int(visualization_cfg.seed),
+        )
     _write_json(run_dir / 'summary.json', summary)
     (run_dir / 'report.md').write_text(_render_report(summary), encoding='utf-8')
     _plot_probe_scores(summary, run_dir / 'probe_scores.png')
-    _LOGGER.info('ML10 update-information diagnostic complete: %s', run_dir)
+    _LOGGER.info(
+        '%s update-information diagnostic complete: %s', benchmark.label, run_dir
+    )
     return run_dir
 
 

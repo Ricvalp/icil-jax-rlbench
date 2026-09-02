@@ -522,6 +522,43 @@ uv run --frozen --group metaworld python \
   --config.checkpoint_path="$TTT_CKPT"
 ```
 
+Expand the family-validation screen to ten latent instances from each of the
+five held-out families, with one matched rollout per condition:
+
+```bash
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld --extra cuda12 python \
+  -m icil_jax_rlbench.eval_metaworld_ml45_ttt \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml45_ttt.py \
+  --config.checkpoint_path="$TTT_CKPT" \
+  --config.output_dir=eval_outputs/metaworld_ml45_ttt/family_validation_expanded \
+  --config.split=family_validation \
+  --config.max_tasks=50 \
+  --config.support_counts='(2,)' \
+  --config.conditions='("no_update","correct_support","same_family_wrong_instance","different_family_support","shuffled_actions","random_update_matched_norm")' \
+  --config.closed_loop_episodes=1
+```
+
+Analyze what task information ML45 WRITE updates contain and generate
+interactive update embeddings:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld --extra cuda12 python \
+  -m icil_jax_rlbench.analyze_metaworld_ml45_information \
+  --config=icil_jax_rlbench/configs/analyze_metaworld_ml45_information.py \
+  --config.checkpoint_path="$TTT_CKPT"
+```
+
+The diagnostic saves all unprojected representations in `features.npz`, frozen
+probe and support-control results in `summary.json`, and interactive plots under
+`tsne/`. Each t-SNE uses row-normalized updates followed by PCA, never a random
+projection. Family plots distinguish splits by marker shape. Held-out-focus
+plots color the five family-validation families, retain familiar-family points
+as gray context, and connect the two support samples belonging to each task
+instance. Original-space cosine and nearest-neighbor measurements are recorded
+in `tsne/manifest.json`; use those for conclusions and t-SNE for exploration.
+
 Use `metaworld_ml45_fomaml.py` and `metaworld_ml45_action_bc.py` for the matched
 ablations. Add `--config.record_video=True
 --config.save_rollout_artifacts=True` for qualitative rollouts. Do not switch

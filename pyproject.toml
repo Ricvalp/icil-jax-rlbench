@@ -39,6 +39,8 @@ visualization = [
   "av>=14,<17",
   "imageio>=2.37,<3",
   "matplotlib>=3.9,<4",
+  "plotly>=6,<7",
+  "scikit-learn>=1.7,<2",
 ]
 
 [tool.uv.sources]
