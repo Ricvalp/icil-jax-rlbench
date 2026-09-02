@@ -4,8 +4,8 @@ This branch implements the adaptation-only fast-weight TTT program in
 `ICIL_TTT_IMPLEMENTATION_PLAN.md`. The former direct-regression pretraining,
 parameter-MAML, and memory-MAML paths have been removed deliberately.
 
-The policy experiments use hidden-goal MetaWorld ML1 Reach, ML1 Push, and ML10 through
-the independent `phi-mujoco` interoperability layer. A self-contained synthetic
+The policy experiments use hidden-goal MetaWorld ML1 Reach, ML1 Push, ML10, and
+ML45 through the independent `phi-mujoco` interoperability layer. A self-contained synthetic
 hidden-goal benchmark remains available for fast mechanism and autodiff tests.
 End-to-end RLBench TTT remains gated on successful held-out-latent state
 experiments.
@@ -35,10 +35,10 @@ uv sync --group metaworld --extra wandb
 uv run --group metaworld pytest -q
 ```
 
-This installs the `metaworld_ml1_reach`, `metaworld_ml1_push`, and `metaworld_ml10`
-data/evaluation adapters. ICIL owns the task-aware support/query sampler,
-train-task normalization, JAX policy, adaptation, and experimental controls;
-simulator and collection logic remains in `phi-mujoco`.
+This installs the `metaworld_ml1_reach`, `metaworld_ml1_push`, `metaworld_ml10`,
+and `metaworld_ml45` data/evaluation adapters. ICIL owns the task-aware
+support/query sampler, train-task normalization, JAX policy, adaptation, and
+experimental controls; simulator and collection logic remains in `phi-mujoco`.
 
 On a CUDA 12 machine, add the JAX CUDA wheels:
 
@@ -397,9 +397,89 @@ This evaluation distinguishes same-family wrong-instance support from support
 drawn from a different family. Videos remain isolated in the evaluation path;
 add `--config.record_video=True --config.save_rollout_artifacts=True`.
 
+Inspect what task information the learned WRITE update retains with the
+standalone update-information diagnostic. It extracts full vectors without a
+random projection and writes `features.npz`, `summary.json`, `report.md`, and a
+probe plot:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.analyze_metaworld_ml10_information \
+  --config=icil_jax_rlbench/configs/analyze_metaworld_ml10_information.py \
+  --config.checkpoint_path="$TTT_CKPT"
+```
+
+Run this once for KVB and once for support-BC. Frozen probes train on instances
+000--039 and evaluate on instances 040--049. They report family classification,
+within-family latent regression, update cosine geometry, support-control
+direction changes, query gain, and oracle query-gradient alignment. The oracle
+gradient is diagnostic-only and never enters WRITE or READ.
+
 After all settings are frozen, retrain query-only and KVB with
 `metaworld_ml10_query_only_final.py` and `metaworld_ml10_kvb_final.py`. Evaluate
 that final KVB checkpoint once with `--config.split=test --config.max_tasks=0`.
+
+## ML45 Workflow
+
+ML45 tests whether the ML10 failure is caused by an easy family-labeling
+minimum. The development protocol trains on instances 000--039 from 40
+families, uses instances 040--049 for latent validation, and holds out five
+compositionally related families for family validation. The five native ML45
+test families remain untouched. Family/composition labels are cache metadata
+and never enter the model.
+
+Collect at least four successful episodes for each of the 2,500 tasks. This is
+the minimum for the default two-support/two-query meta-batch; collect more when
+the offline evaluator needs additional independent query episodes:
+
+```bash
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+raw="$PWD/datasets/raw/metaworld_ml45-$stamp"
+processed="$PWD/datasets/processed/metaworld_ml45-$stamp"
+
+uv run --frozen --group metaworld phi-mujoco collect metaworld_ml45 \
+  --output-directory "$raw" --episodes 10000 --seed 0 --quiet --progress
+uv run --frozen --group metaworld phi-mujoco convert metaworld_ml45 "$raw" \
+  --output-directory "$processed"
+uv run --frozen --group metaworld phi-mujoco validate-cache "$processed"
+export PHI_MUJOCO_ML45_CACHE="$processed"
+```
+
+Train query-only BC, then initialize full-second-order KVB with delta READ:
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.train_metaworld_query_only \
+  --config=icil_jax_rlbench/configs/metaworld_ml45_query_only.py
+
+QUERY_CKPT=/absolute/path/to/outputs/metaworld_ml45_query_only/<run-id>/last.pkl
+export ICIL_ML45_QUERY_CHECKPOINT="$QUERY_CKPT"
+
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.train_metaworld_ttt \
+  --config=icil_jax_rlbench/configs/metaworld_ml45_kvb.py
+```
+
+Evaluate the compositional family holdouts with matched support controls:
+
+```bash
+TTT_CKPT=/absolute/path/to/outputs/metaworld_ml45_ttt/<run-id>/last.pkl
+
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld python \
+  -m icil_jax_rlbench.eval_metaworld_ml45_ttt \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml45_ttt.py \
+  --config.checkpoint_path="$TTT_CKPT"
+```
+
+Use `metaworld_ml45_fomaml.py` and `metaworld_ml45_action_bc.py` for the matched
+ablations. Add `--config.record_video=True
+--config.save_rollout_artifacts=True` for qualitative rollouts. Do not switch
+to `--config.split=test` until all choices are fixed on latent and family
+validation.
 
 The synthetic benchmark remains useful for Gate 2 and fast-weight
 implementation checks:

@@ -20,6 +20,10 @@ from phi_mujoco.integrations.metaworld_ml10 import (
     MetaWorldML10Integration,
     load_ml10_task_index,
 )
+from phi_mujoco.integrations.metaworld_ml45 import (
+    MetaWorldML45Integration,
+    load_ml45_task_index,
+)
 from phi_mujoco.offline import (
     EpisodeSplit,
     SplitConfig,
@@ -111,6 +115,22 @@ _BENCHMARKS = {
             slug='ml10',
             task_index_loader=load_ml10_task_index,
             integration_type=MetaWorldML10Integration,
+            protocols=('development', 'final'),
+            split_names=(
+                'train',
+                'latent_validation',
+                'family_validation',
+                'validation',
+                'test',
+            ),
+            family_aware=True,
+        ),
+        MetaWorldHiddenGoalBenchmark(
+            integration_name='metaworld_ml45',
+            label='ML45',
+            slug='ml45',
+            task_index_loader=load_ml45_task_index,
+            integration_type=MetaWorldML45Integration,
             protocols=('development', 'final'),
             split_names=(
                 'train',

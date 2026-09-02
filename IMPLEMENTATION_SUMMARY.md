@@ -11,7 +11,9 @@ and generic visual primitives remain because they are needed by the TTT plan.
 The repository now has two state paths. The synthetic hidden-goal 2D task is
 retained for fast autodiff and mechanism checks. The first scientific policy
 experiment uses the independent `phi-mujoco` `metaworld_ml1_reach` integration
-for collection, processed data, task binding, and closed-loop evaluation.
+for collection, processed data, task binding, and closed-loop evaluation. The
+same public contract now supports ML1 Push, ML10, and the audited ML45 family
+benchmark.
 
 ## MetaWorld Policy Path
 
@@ -50,6 +52,21 @@ uses fresh rollout seeds matched across conditions, resets to `W0` at every
 goal/condition boundary, freezes the resulting fast state across query
 rollouts, and delegates simulation and optional video artifacts to public
 `phi_mujoco` evaluation contracts.
+
+ML10 and ML45 retain explicit family and native-instance identity in cache
+metadata. ML45 development uses 1,600 training tasks from 40 families, 400
+disjoint latent-validation instances, 250 tasks from five compositional family
+holdouts, and 250 untouched native-test tasks. Evaluation summaries include
+overall, per-family, and per-motion-phase aggregates; these labels never enter
+the policy.
+
+The standalone ML10 update-information diagnostic extracts full, unprojected
+first WRITE gradients, oracle query gradients, final fast deltas, functional
+READ/action changes, and raw-support statistics. Frozen probes train on the
+development training instances and evaluate on latent-validation instances.
+Matched support perturbations, cosine geometry, within-family latent
+regression, and family classification are written as NPZ, JSON, Markdown, and
+plot artifacts. Oracle query gradients are diagnostic-only.
 
 ## Adaptation Mechanism
 
@@ -138,20 +155,28 @@ online evaluator because the plan requires Gate 3 first.
   KVB trainer, and held-out KVB evaluator are implemented. Focused tests cover
   one-step full-second-order training, checkpoint contents, adapted policy
   inference, and exact resume semantics.
+- The ML10 update-information diagnostic ran end to end on the real delta-KVB
+  checkpoint and processed cache. It retained all 4,192 fast-state coordinates
+  without random projection.
+- The phi-mujoco ML45 audit validates all 50 reset contracts. Native tests pass
+  crossed support/query resets for all families and official expert collection
+  for all 50 families with bounded start retries.
 - A real 2,400-episode query-only run and Gate 1 evaluation were completed;
   ordinary correct-support adaptation materially exceeded no update on the
   validation goals.
 - Two synthetic KVB optimization seeds show support-specific held-out
   adaptation. This is a mechanism result, not the final MetaWorld Gate 3.
-- Multi-seed MetaWorld KVB training and held-out validation/test evaluation are
-  the next scientific experiments.
+- ML45 query-only and full-second-order KVB training are now runnable; broad
+  data collection and the resulting family-holdout experiment remain to run.
 - End-to-end RLBench TTT remains gated on a robust Gate 3 result.
 
 ## Next Experiments
 
-1. Train `metaworld_ml1_reach_kvb.py` from the competent query-only checkpoint
-   with at least three optimization seeds.
-2. Select settings only on the 10 validation goals using the complete support
-   control and support-count sweep.
-3. Run matched FOMAML and support-BC WRITE ablations, then evaluate the frozen
-   choices once on the 50 untouched test goals.
+1. Run the ML10 update-information diagnostic for matched delta-KVB and
+   support-BC checkpoints and compare family-label versus within-family latent
+   information.
+2. Collect the balanced ML45 cache and train `metaworld_ml45_query_only.py`,
+   followed by `metaworld_ml45_kvb.py`.
+3. Select settings on latent and compositional family validation. Run matched
+   FOMAML and support-BC ablations before evaluating the untouched native test
+   families.

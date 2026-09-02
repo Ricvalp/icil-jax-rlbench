@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from ml_collections import ConfigDict
 from phi_mujoco.evaluation import EvaluationConfig, EvaluationRunner
+from phi_mujoco.integrations import family_composition
 
 from icil_jax_rlbench.data.metaworld_hidden_goal import (
     MetaWorldTaskDataset,
@@ -209,6 +210,54 @@ def _aggregate(
     return aggregate
 
 
+def _grouped_aggregate(
+    records: Mapping[str, Mapping[str, list[dict[str, Any]]]],
+    *,
+    metadata_key: str,
+    seed: int,
+) -> dict[str, Any]:
+    labels = sorted(
+        {
+            label
+            for by_condition in records.values()
+            for condition_records in by_condition.values()
+            for record in condition_records
+            for label in (
+                record[metadata_key]
+                if isinstance(record[metadata_key], list)
+                else [record[metadata_key]]
+            )
+        }
+    )
+    grouped: dict[str, Any] = {}
+    for label_index, label in enumerate(labels):
+        selected = {
+            count: {
+                condition: [
+                    record
+                    for record in condition_records
+                    if (
+                        label in record[metadata_key]
+                        if isinstance(record[metadata_key], list)
+                        else record[metadata_key] == label
+                    )
+                ]
+                for condition, condition_records in by_condition.items()
+            }
+            for count, by_condition in records.items()
+        }
+        if any(
+            not condition_records
+            for by_condition in selected.values()
+            for condition_records in by_condition.values()
+        ):
+            continue
+        grouped[str(label)] = _aggregate(
+            selected, seed=int(seed) + label_index * 1_000
+        )
+    return grouped
+
+
 def evaluate_metaworld_ttt(cfg: ConfigDict) -> Path:
     if not str(cfg.checkpoint_path):
         raise ValueError('checkpoint_path is required.')
@@ -367,6 +416,10 @@ def evaluate_metaworld_ttt(cfg: ConfigDict) -> Path:
             )
             correct_adapted, correct_trace = adapt(params, correct_support)
             task_descriptor = dataset.task_descriptor(task_id)
+            task_family = dataset.task_family(task_id)
+            composition = (
+                family_composition(task_family) if benchmark.family_aware else None
+            )
 
             for condition in conditions:
                 condition_index = SUPPORTED_CONDITIONS.index(condition)
@@ -461,7 +514,24 @@ def evaluate_metaworld_ttt(cfg: ConfigDict) -> Path:
                 records[count_key][condition].append(
                     {
                         'task_id': task_id,
-                        'task_family': dataset.task_family(task_id),
+                        'task_family': task_family,
+                        'task_motion_phases': (
+                            [] if composition is None else list(composition.phases)
+                        ),
+                        'task_composition': (
+                            None
+                            if composition is None
+                            else {
+                                'signature': composition.signature,
+                                'gripper': composition.gripper,
+                                'manipulated_entity': composition.manipulated_entity,
+                                'target_relation': composition.target_relation,
+                                'structure': list(composition.structure),
+                                'ml45_development_role': (
+                                    composition.ml45_development_role
+                                ),
+                            }
+                        ),
                         'privileged_task_descriptor': task_descriptor,
                         'support_source_task_id': source_task_id or None,
                         'support_episode_ids': source_episode_ids,
@@ -499,6 +569,16 @@ def evaluate_metaworld_ttt(cfg: ConfigDict) -> Path:
             )
 
     aggregate = _aggregate(records, seed=int(cfg.seed) + 50_000)
+    aggregate_by_family = _grouped_aggregate(
+        records,
+        metadata_key='task_family',
+        seed=int(cfg.seed) + 60_000,
+    )
+    aggregate_by_motion_phase = _grouped_aggregate(
+        records,
+        metadata_key='task_motion_phases',
+        seed=int(cfg.seed) + 70_000,
+    )
     summary = {
         'gate': 'metaworld_hidden_goal_adaptation_only_generalization',
         'checkpoint_path': str(Path(cfg.checkpoint_path).expanduser().resolve()),
@@ -524,6 +604,8 @@ def evaluate_metaworld_ttt(cfg: ConfigDict) -> Path:
             '10000-sample percentile bootstrap over held-out family instances'
         ),
         'aggregate': aggregate,
+        'aggregate_by_family': aggregate_by_family,
+        'aggregate_by_motion_phase': aggregate_by_motion_phase,
         'per_support_count': records,
     }
     _write_json(run_dir / 'resolved_eval_config.json', config_to_dict(cfg))
