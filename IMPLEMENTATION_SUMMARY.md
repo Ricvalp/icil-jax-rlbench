@@ -67,20 +67,23 @@ contracts and a validity mask. These controls exclude opaque task identity and
 episode nuisance, use train-task-only latent normalization, have distinct
 checkpoint types, and cannot initialize the main KVB path.
 
-The standalone ML10 update-information diagnostic extracts full, unprojected
+The standalone ML10/ML45 update-information diagnostic extracts full, unprojected
 first WRITE gradients, oracle query gradients, final fast deltas, functional
 READ/action changes, and raw-support statistics. Frozen probes train on the
 development training instances and evaluate on latent-validation instances.
 Matched support perturbations, cosine geometry, within-family latent
 regression, and family classification are written as NPZ, JSON, Markdown, and
-plot artifacts. Oracle query gradients are diagnostic-only.
+plot artifacts. ML45 additionally produces PCA+t-SNE views across train,
+latent-validation, and held-out-family updates. Oracle query gradients are
+diagnostic-only.
 
 ## Adaptation Mechanism
 
 The state policy contains separate support and query encoders, learned key/value/
 query projections, a small linear or MLP fast model, meta-learned `W0`, positive
-learned per-tensor update rates, clipped fast gradients/updates, and a gated READ
-residual.
+learned per-tensor update rates, clipped fast gradients/updates, and an absolute-
+gated or delta READ residual. Delta READ subtracts the `W0` output, making it an
+exact query-only no-op at initialization while retaining fast-state gradients.
 
 KVB WRITE is:
 
@@ -162,9 +165,10 @@ online evaluator because the plan requires Gate 3 first.
   KVB trainer, and held-out KVB evaluator are implemented. Focused tests cover
   one-step full-second-order training, checkpoint contents, adapted policy
   inference, and exact resume semantics.
-- The ML10 update-information diagnostic ran end to end on the real delta-KVB
-  checkpoint and processed cache. It retained all 4,192 fast-state coordinates
-  without random projection.
+- The ML10 update-information diagnostic ran for matched delta-KVB and
+  delta-support-BC checkpoints. Both retained family and latent information;
+  support-BC was more sensitive to shuffled actions, while both remained nearly
+  invariant to shuffled time.
 - The phi-mujoco ML45 audit validates all 50 reset contracts. Native tests pass
   crossed support/query resets for all families and audited expert collection
   for all 50 families with bounded start retries. The wall-button family uses a
@@ -178,17 +182,32 @@ online evaluator because the plan requires Gate 3 first.
   validation goals.
 - Two synthetic KVB optimization seeds show support-specific held-out
   adaptation. This is a mechanism result, not the final MetaWorld Gate 3.
-- ML45 query-only and full-second-order KVB training are now runnable; broad
-  data collection and the resulting family-holdout experiment remain to run.
+- A balanced 10,000-episode ML45 cache, step-100,000 query-only checkpoint, and
+  step-100,000 full-second-order delta-READ KVB checkpoint were produced.
+- On 120 unseen latent instances from 40 familiar families, ML45 KVB improved
+  closed-loop success from 47.5% without updates to 80.0% with correct support,
+  but same-family wrong-instance and shuffled-action support remained high at
+  70.0% and 74.2%.
+- On 50 instances from five held-out development families, the same KVB update
+  reduced success from 66% to 40%. Ordinary support-BC adaptation of the query
+  encoder and heads on the same screen improved success from 40% to 58%, showing
+  that support contains a useful direction that current KVB does not transfer.
+- The ML45 information diagnostic found perfectly family-separable,
+  low-effective-rank fast deltas, near invariance to time shuffling, and
+  near-zero held-out query-gradient alignment. This is currently interpreted as
+  a WRITE actionability/alignment or fast-subspace problem rather than absence
+  of task information in support.
 - End-to-end RLBench TTT remains gated on a robust Gate 3 result.
 
 ## Next Experiments
 
-1. Run the ML10 update-information diagnostic for matched delta-KVB and
-   support-BC checkpoints and compare family-label versus within-family latent
-   information.
-2. Collect the balanced ML45 cache and train `metaworld_ml45_query_only.py`,
-   followed by `metaworld_ml45_kvb.py`.
-3. Select settings on latent and compositional family validation. Run matched
-   FOMAML and support-BC ablations before evaluating the untouched native test
-   families.
+1. Run the action-head-only ordinary Gate 1 screen on the same 50 ML45
+   family-validation instances; the completed `all` run effectively adapted the
+   query encoder and heads because READ-only groups receive zero gradient.
+2. Train and evaluate the matched full-second-order ML45 support-action-BC WRITE
+   config with delta READ.
+3. Use those two results to distinguish a fast-module placement/capacity limit
+   from KVB WRITE-objective alignment. If KVB alignment is isolated, add one
+   causal future-state/effect target before attempting larger objective mixtures.
+4. Keep the native ML45 test families and RLBench TTT untouched until the
+   development family holdout shows support-specific adaptation.

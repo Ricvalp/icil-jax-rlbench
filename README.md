@@ -28,6 +28,14 @@ Robotics/
   phi-mujoco/
 ```
 
+Clone both repositories with that layout before syncing this environment. The
+experiments summarized below used `phi-mujoco` commit `e59d9b0`:
+
+```bash
+git clone git@github.com:PHI-Lab-AI4I/phi-mujoco.git ../phi-mujoco
+git -C ../phi-mujoco checkout e59d9b0
+```
+
 Install that local integration and optional W&B support with:
 
 ```bash
@@ -559,6 +567,53 @@ as gray context, and connect the two support samples belonging to each task
 instance. Original-space cosine and nearest-neighbor measurements are recorded
 in `tsne/manifest.json`; use those for conclusions and t-SNE for exploration.
 
+Run the ordinary-adaptation upper bound on the same 50 family-validation
+instances when distinguishing unavailable support information from a learned
+fast-WRITE failure:
+
+```bash
+QUERY_CKPT=/absolute/path/to/outputs/metaworld_ml45_query_only/<run-id>/last.pkl
+
+MUJOCO_GL=egl XLA_PYTHON_CLIENT_PREALLOCATE=false \
+uv run --frozen --group metaworld --extra cuda12 python \
+  -m icil_jax_rlbench.eval_metaworld_ml45_gate1 \
+  --config=icil_jax_rlbench/configs/eval_metaworld_ml45_gate1.py \
+  --config.checkpoint_path="$QUERY_CKPT" \
+  --config.output_dir=eval_outputs/metaworld_ml45_gate1/family_validation_expanded \
+  --config.split=family_validation \
+  --config.max_tasks=50 \
+  --config.support_episodes=2 \
+  --config.offline_query_episodes=2 \
+  --config.inner_steps=100 \
+  --config.inner_lr=0.01 \
+  --config.adapt_subset=all \
+  --config.closed_loop_episodes=1 \
+  --config.closed_loop_base_seed=3000000
+```
+
+### Current ML45 result
+
+As of 2026-09-03, one seed of query-only BC and full-second-order delta-READ KVB
+has completed 100,000 steps. On 120 unseen latent instances from the 40 familiar
+families, KVB correct-support adaptation reached 80.0% success versus 47.5% with
+no update, but same-family wrong-instance and shuffled-action support still
+reached 70.0% and 74.2%. On 50 instances from the five held-out development
+families, correct KVB updates reduced success from 66% to 40%.
+
+Ordinary support-BC adaptation of the query encoder and action heads on those
+same 50 held-out-family instances improved success from 40% to 58%; shuffled
+actions and observations-only controls reached 2% and 0%. The support therefore
+contains a useful update direction, but current KVB does not transfer it through
+the small fast state. The update-information diagnostic found highly
+family-separable, low-effective-rank fast deltas that were almost unchanged by
+time shuffling and had near-zero held-out query-gradient alignment.
+
+The next unresolved comparison is action-head-only ordinary adaptation followed
+by the matched full-second-order delta-READ support-BC WRITE run. These separate
+fast-module placement/capacity from KVB-objective alignment. The official ML45
+test split remains untouched. Exact checkpoints, metrics, artifact paths, and
+the continuation decision tree are recorded in `SUMMARY.md`.
+
 Use `metaworld_ml45_fomaml.py` and `metaworld_ml45_action_bc.py` for the matched
 ablations. Add `--config.record_video=True
 --config.save_rollout_artifacts=True` for qualitative rollouts. Do not switch
@@ -741,5 +796,6 @@ rg -n "^(from|import) (icil|icil_jax_query_memory|diagnostics|metaworld)(\\.|\\s
   icil_jax_rlbench tests
 ```
 
-See `IMPLEMENTATION_SUMMARY.md` for implemented gradient semantics, known limits,
-and the current diagnostic status.
+See `IMPLEMENTATION_SUMMARY.md` for implemented gradient semantics and known
+limits. See `SUMMARY.md` for the current experiment history, artifact map, and
+continuation state.
